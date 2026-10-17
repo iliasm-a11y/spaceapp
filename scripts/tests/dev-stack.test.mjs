@@ -148,9 +148,22 @@ test("dev-stack readiness requires a real PostgreSQL store, worker and CLI host"
   assert.equal(readyResponse({ ok: true }), false);
 });
 
-test("dev-stack refuses to signal a recycled process identity", async () => {
-  await assert.rejects(stopRecords([{ ...processIdentity(process.pid), start: "different-start" }]), /reused PID/);
-  assert.ok(isSameProcess(processIdentity(process.pid)));
+test("dev-stack skips recycled identities while stopping remaining owned processes", async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  mkdirSync(join(state.directory, "logs"));
+  const runner = new ProcessSupervisor(state, {}, () => {});
+  try {
+    const unrelated = runner.start("unrelated-fixture", process.execPath, ["-e", "setInterval(()=>{},1000)"], {}, false);
+    const managed = runner.start("managed-fixture", process.execPath, ["-e", "setInterval(()=>{},1000)"], {}, false);
+    const unrelatedIdentity = processIdentity(unrelated.pid);
+    const managedIdentity = processIdentity(managed.pid);
+    assert.ok(unrelatedIdentity && managedIdentity);
+    // A mismatched birth identity models a saved PID now owned by someone else.
+    await stopRecords([{ ...unrelatedIdentity, start: "different-start" }, managedIdentity]);
+    assert.ok(isSameProcess(unrelatedIdentity), "never signal the unrelated live process");
+    assert.equal(isSameProcess(managedIdentity), false, "still stop the authenticated managed process");
+  } finally { await runner.stop(); }
 });
 
 test("dev-stack supervises real children, redacts split output and stops separate-session descendants", async (t) => {

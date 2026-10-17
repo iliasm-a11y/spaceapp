@@ -155,7 +155,8 @@ Platform notes and troubleshooting:
 - **Docker unavailable during cleanup:** restart Docker and retry `down` or
   `reset` with the same state directory. Do not delete its secrets manually.
 - **Unexpected host or supervisor crash:** rerun `down`/`reset`; saved process
-  identities are checked before signaling, so recycled PIDs are refused.
+  identities are checked before signaling. Recycled PIDs are skipped without
+  blocking cleanup of the remaining owned processes.
   PTY descendant identities are captured while their host is alive so recovery
   can also stop recorded children reparented by a host crash.
 - **Platform coverage:** existing host analytics and some filesystem tests use

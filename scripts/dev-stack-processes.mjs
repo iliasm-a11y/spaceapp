@@ -50,7 +50,9 @@ export async function stopRecords(records, timeout = 8000) {
   const groups = new Set();
   for (const record of records) {
     const actual = processIdentity(record.pid, table);
-    if (actual && actual.start !== record.start) throw new Error(`Refusing to signal reused PID ${record.pid}.`);
+    // The saved process is gone; leave the PID's new owner untouched and
+    // continue cleaning up the remaining authenticated processes.
+    if (actual && actual.start !== record.start) continue;
     // Require a live, authenticated member before signaling a saved group.
     // Its numeric ID alone is not an identity after a long host outage.
     if (record.pgid === record.pid && record.pgid !== processIdentity(process.pid, table)?.pgid && records.some((member) => member.pgid === record.pgid && isSameProcess(member, table))) groups.add(record.pgid);
