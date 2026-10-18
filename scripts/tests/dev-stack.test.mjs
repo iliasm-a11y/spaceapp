@@ -322,3 +322,44 @@ test("dev-stack reports an executable startup failure and drains its child handl
   } finally { await runner.stop(); }
   assert.deepEqual(state.processes, []);
 });
+
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  test(`smoke restores both edited sources synchronously on ${signal}`, { timeout: 10_000 }, async (t) => {
+    const directory = fixture(t);
+    const paths = [join(directory, "server.ts"), join(directory, "index.ts")];
+    const originals = ["// original API\n", "// original contracts\n"];
+    paths.forEach((path, index) => writeFileSync(path, originals[index]));
+    // Execute the actual smoke cleanup block in an isolated child, without
+    // launching Docker or editing the contributor's real source files.
+    const smoke = readFileSync(join(root, "scripts/dev-stack-smoke.mjs"), "utf8");
+    const start = smoke.indexOf("const originalFiles = new Map();");
+    const end = smoke.indexOf("\ntry {", start);
+    assert.ok(start >= 0 && end > start, "smoke source guard must precede its try/finally");
+    const child = childProcess.spawn(process.execPath, ["-e", `
+      const { readFileSync, writeFileSync } = require("node:fs");
+      const directory = ${JSON.stringify(directory)};
+      ${smoke.slice(start, end)}
+      for (const path of ${JSON.stringify(paths)}) {
+        originalFiles.set(path, readFileSync(path, "utf8"));
+        writeFileSync(path, originalFiles.get(path) + "console.log('smoke-marker');\\n");
+      }
+      process.send("edited");
+      setInterval(() => {}, 1000);
+    `], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    await new Promise((resolve, reject) => {
+      child.once("message", resolve);
+      child.once("error", reject);
+      child.once("exit", () => reject(new Error(`fixture exited before editing: ${stderr}`)));
+    });
+    assert.ok(paths.every((path) => readFileSync(path, "utf8").includes("smoke-marker")));
+    child.kill(signal);
+    const result = await exited;
+    paths.forEach((path, index) => assert.equal(readFileSync(path, "utf8"), originals[index]));
+    assert.deepEqual(result, { code, signal: null });
+    assert.match(stderr, /Interrupted.*reset/);
+  });
+}

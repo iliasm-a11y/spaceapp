@@ -79,6 +79,25 @@ async function waitReady() {
 async function command(name) { return execute("npm", ["run", "dev:stack", "--", name], { cwd: root, env, timeout: 900_000 }); }
 
 const originalFiles = new Map();
+/**
+ * Restore every source snapshot synchronously, including during signal handling.
+ * Attempt all files before reporting errors so one failed write cannot strand another marker.
+ */
+function restoreSources() {
+  const errors = [];
+  for (const [path, text] of originalFiles) {
+    try { writeFileSync(path, text); } catch (error) { errors.push(error); }
+  }
+  if (errors.length) throw new AggregateError(errors, "Could not restore smoke source files");
+}
+for (const [signal, exitCode] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  process.once(signal, () => {
+    let code = exitCode;
+    try { restoreSources(); } catch (error) { console.error(error); code = 1; }
+    console.error(`[smoke:dev-stack] Interrupted; run dev:stack -- reset with SPACE_DEV_STATE_DIR set to ${directory}`);
+    process.exit(code);
+  });
+}
 try {
   await waitReady();
   await until(() => output.includes("Stop: npm run dev:stack -- down"), "startup banner", 30_000);
@@ -124,7 +143,7 @@ try {
   ws.close();
   ws = null;
 
-  // Edits are restored in finally, including when compilation or polling fails.
+  // Restore on normal/error completion and catchable termination signals.
   const apiFile = join(root, "apps/api/src/server.ts");
   originalFiles.set(apiFile, readFileSync(apiFile, "utf8"));
   const marker = `dev-stack-api-watch-${label}`;
@@ -163,7 +182,7 @@ try {
   throw error;
 } finally {
   if (ws) ws.terminate();
-  for (const [path, text] of originalFiles) writeFileSync(path, text);
+  restoreSources();
   if (existsSync(join(directory, "manifest.json"))) {
     state = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
     const processes = [...state.processes, ...(state.controller ? [state.controller] : [])];

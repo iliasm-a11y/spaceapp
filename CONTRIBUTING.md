@@ -172,9 +172,12 @@ Platform notes and troubleshooting:
 its own ports and `.dev-stack-smoke-*` state: readiness, owner claim and sign-in,
 CSRF, Getting Started, real OpenCode PTY output over the Vite WebSocket proxy,
 API watch, shared-package rebuild, worker failure and reset cleanup. It restores
-source files edited for reload checks, so use a checkout with no concurrent
-source edits. The Ubuntu CI job runs this path directly after `npm ci`, without
-a build that could hide missing startup steps.
+source files edited for reload checks on completion and on SIGINT, SIGTERM or
+SIGHUP; SIGKILL cannot be caught. Use a checkout with no concurrent source
+edits. After an interrupt, follow the printed state-directory instructions to
+run `reset` for any remaining Docker resources. The Ubuntu CI job runs this
+path directly after `npm ci`, without a build that could hide missing startup
+steps.
 
 ## Make and verify a small change
 
