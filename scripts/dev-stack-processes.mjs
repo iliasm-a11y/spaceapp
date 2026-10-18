@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { saveState } from "./dev-stack-state.mjs";
 
+/**
+ * Read PID, parent, group, birth time and state using the ps fields shared by Linux and macOS.
+ * Zombies are retained in this snapshot so identity checks can explicitly reject them.
+ */
 export function processTable() {
   const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,lstart=,stat="], { encoding: "utf8" });
   return output.trim().split("\n").filter(Boolean).map((line) => {
@@ -12,6 +16,11 @@ export function processTable() {
   });
 }
 
+/**
+ * Identify a live process by PID and birth time, returning null once it disappears.
+ * Linux start ticks avoid the one-second resolution of the portable ps birth timestamp.
+ * @returns {{pid: number, pgid: number, start: string} | null} A snapshot, not a permanent PID lease.
+ */
 export function processIdentity(pid, table = processTable()) {
   const record = table.find((entry) => entry.pid === pid && !/[ZX]/.test(entry.stat));
   if (!record) return null;
@@ -25,10 +34,16 @@ export function processIdentity(pid, table = processTable()) {
   return { pid, pgid: record.pgid, start };
 }
 
+/**
+ * Check a saved birth identity against a current snapshot before treating its PID as owned.
+ */
 export function isSameProcess(record, table) {
   return Boolean(record && processIdentity(record.pid, table ?? processTable())?.start === record.start);
 }
 
+/**
+ * Collect the transitive child tree, including its root, from one consistent process snapshot.
+ */
 export function descendants(pid, table) {
   const found = new Set([pid]);
   for (;;) {
@@ -38,10 +53,21 @@ export function descendants(pid, table) {
   }
 }
 
+/**
+ * Deliver a signal, tolerating a process that exited between observation and delivery.
+ * Permission and other delivery failures propagate so recovery state is preserved.
+ */
 function send(pid, signal) {
   try { process.kill(pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
+/**
+ * Stop only processes authenticated by saved birth identities, including persisted PTY descendants.
+ * Recheck group membership before TERM/KILL; a reused PID or group must not block other cleanup.
+ * @param {Array<object>} records Saved process identities and optional descendant identities.
+ * @param {number} timeout Grace period in milliseconds before escalating to SIGKILL.
+ * @throws {Error} If authenticated processes survive or signal delivery fails; callers must retain state.
+ */
 export async function stopRecords(records, timeout = 8000) {
   if (!records.length) return;
   records = records.flatMap((record) => [record, ...(record.descendants ?? [])]);
@@ -61,15 +87,31 @@ export async function stopRecords(records, timeout = 8000) {
       if (identity) children.push(identity);
     }
   }
+  // Group IDs can be reused between TERM and KILL. Authenticate a captured
+  // live member in the group again before every group signal and liveness check.
+  /**
+   * Require a captured live identity still in this group; its numeric ID alone cannot establish ownership.
+   */
+  const ownsGroup = (group, current) => children.some((child) => {
+    const actual = processIdentity(child.pid, current);
+    return actual?.start === child.start && actual.pgid === group;
+  });
+  /**
+   * Authenticate group membership and individual birth identities again at each escalation step.
+   */
   const signalAll = (signal) => {
-    for (const group of groups) send(-group, signal);
+    const table = processTable();
+    for (const group of groups) if (ownsGroup(group, table)) send(-group, signal);
     const current = processTable();
     // PTY children create new sessions, so group signaling alone misses them.
     for (const child of children) if (isSameProcess(child, current)) send(child.pid, signal);
   };
+  /**
+   * Wait only for authenticated identities, ignoring zombies and subsequently reused numeric groups.
+   */
   const alive = () => {
     const current = processTable();
-    return current.some((entry) => groups.has(entry.pgid) && !/[ZX]/.test(entry.stat)) || children.some((entry) => isSameProcess(entry, current));
+    return [...groups].some((group) => ownsGroup(group, current)) || children.some((entry) => isSameProcess(entry, current));
   };
   signalAll("SIGTERM");
   let deadline = Date.now() + timeout;
@@ -83,6 +125,10 @@ export async function stopRecords(records, timeout = 8000) {
 }
 
 export class ProcessSupervisor {
+  /**
+   * Track children, their private logs and persistent recovery identities for one stack.
+   * Required child failures are reported through onFailure; expected shutdown exits are suppressed.
+   */
   constructor(state, secrets, onFailure) {
     this.state = state;
     this.redactions = Object.values(secrets).filter(Boolean);
@@ -93,6 +139,9 @@ export class ProcessSupervisor {
     this.tracker = null;
   }
 
+  /**
+   * Persist observable descendant identities while ancestry is available, retaining live orphans after a crash.
+   */
   captureDescendants() {
     const table = processTable();
     let changed = false;
@@ -111,6 +160,11 @@ export class ProcessSupervisor {
     if (changed) saveState(this.state);
   }
 
+  /**
+   * Spawn a detached service and persist its identity before tracking descendants.
+   * Buffer each output stream by line so secrets split across chunks are redacted in private logs.
+   * @returns {import("node:child_process").ChildProcess} The child, whose unexpected exit is supervised.
+   */
   start(name, command, args, options = {}, required = true) {
     const log = join(this.state.directory, "logs", `${name}.log`);
     const child = spawn(command, args, { cwd: this.state.root, stdio: ["ignore", "pipe", "pipe"], detached: true, ...options });
@@ -121,6 +175,9 @@ export class ProcessSupervisor {
     }
     for (const stream of [child.stdout, child.stderr]) {
       let pending = "";
+      /**
+       * Redact every generated secret before appending a complete output fragment to the private log.
+       */
       const write = (value) => {
         for (const secret of this.redactions) value = value.replaceAll(secret, "[redacted]");
         appendFileSync(log, value, { mode: 0o600 });
@@ -151,6 +208,9 @@ export class ProcessSupervisor {
     return child;
   }
 
+  /**
+   * Run a finite setup command, reject unsuccessful exits and drain its descendants before returning.
+   */
   async run(name, command, args, options = {}) {
     const child = this.start(name, command, args, options, false);
     await new Promise((resolve, reject) => {
@@ -161,6 +221,9 @@ export class ProcessSupervisor {
     await this.stop([name]);
   }
 
+  /**
+   * Mark selected exits as expected, stop their process trees and remove records only after successful cleanup.
+   */
   async stop(names = [...this.children.keys()]) {
     for (const name of names) this.expected.add(name);
     this.captureDescendants();

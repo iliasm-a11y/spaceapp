@@ -1284,6 +1284,9 @@ async function collectStorageMount(targetPath: string) {
   };
 }
 
+/**
+ * Evaluate storage readiness at the configured installation root, including checkout-local source installations.
+ */
 async function collectStorageReadiness(installRoot: string): Promise<StorageReadiness> {
   const [root, app] = await Promise.all([collectStorageMount("/"), collectStorageMount(installRoot)]);
   const dedicatedAppVolume = root.deviceId !== app.deviceId;

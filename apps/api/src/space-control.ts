@@ -1,6 +1,7 @@
 import { liveWatchedTask, liveWatchSubmission } from "./live-watch-identity.js";
 import { terminalRenderAuditEvidenceSchema, terminalRenderBatchSchema, terminalRenderFreshnessMs, type TerminalRenderObservation, type controlScreenshotViewports } from "@space/contracts";
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { appendFileSync, promises as fsPromises } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
@@ -1798,7 +1799,7 @@ export function createSpaceControl(options:{store:SpaceStore;repository:ControlR
           failedTools: failedTools.map(f => ({ tool: f.tool, error: f.error })),
           agentHandoffPrompt
         }) + "\n";
-        appendFileSync("/opt/spaceapp/var/live-voice-logs/debug-incidents.jsonl", line);
+        appendFileSync(join(process.env.SPACE_LIVE_VOICE_LOG_ROOT ?? "/opt/spaceapp/var/live-voice-logs", "debug-incidents.jsonl"), line);
       } catch {}
     }
 
@@ -1906,7 +1907,7 @@ export function createSpaceControl(options:{store:SpaceStore;repository:ControlR
 
     let recentIncidents: any[] = [];
     try {
-      const content = await fsPromises.readFile("/opt/spaceapp/var/live-voice-logs/debug-incidents.jsonl", "utf8");
+      const content = await fsPromises.readFile(join(process.env.SPACE_LIVE_VOICE_LOG_ROOT ?? "/opt/spaceapp/var/live-voice-logs", "debug-incidents.jsonl"), "utf8");
       recentIncidents = content.trim().split("\n").filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean).slice(-5);
     } catch {}
 

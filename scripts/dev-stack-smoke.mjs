@@ -33,7 +33,13 @@ for (const stream of [child.stdout, child.stderr]) stream.on("data", (chunk) => 
   output += chunk.toString();
   process.stdout.write(chunk.toString().replace(/(setup token: )[^\r\n]+/gi, "$1[redacted]"));
 });
+/**
+ * Print an assertion only after its integration checks complete, keeping CI evidence explicit.
+ */
 const check = (message) => console.log(`[smoke:dev-stack] PASS ${message}`);
+/**
+ * Poll an integration assertion within a deadline and abort promptly if the supervised stack exits.
+ */
 async function until(predicate, label, timeout = 900_000) {
   const deadline = Date.now() + timeout;
   let last;
@@ -44,6 +50,9 @@ async function until(predicate, label, timeout = 900_000) {
   }
   throw new Error(`Timed out waiting for ${label}. ${last?.message ?? ""}`);
 }
+/**
+ * Call the Vite-proxied API with the fixture's real session and CSRF credentials, rejecting HTTP errors.
+ */
 async function http(path, method = "GET", body) {
   const response = await fetch(`${origin}${path}`, {
     method, headers: { ...(cookie ? { Cookie: cookie } : {}), Origin: origin, ...(method !== "GET" ? csrf : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
@@ -55,12 +64,18 @@ async function http(path, method = "GET", body) {
   }
   return response;
 }
+/**
+ * Wait until the proxy reports all real stack dependencies ready before attempting owner and CLI flows.
+ */
 async function waitReady() {
   await until(async () => {
     const response = await fetch(`${origin}/readyz`, { signal: AbortSignal.timeout(5000) });
     return response.ok && readyResponse(await response.json());
   }, "PostgreSQL, worker and CLI host readiness");
 }
+/**
+ * Run a lifecycle command against this disposable fixture with its isolated ports and state.
+ */
 async function command(name) { return execute("npm", ["run", "dev:stack", "--", name], { cwd: root, env, timeout: 900_000 }); }
 
 const originalFiles = new Map();

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +10,9 @@ import { composeDefinition, ensureSecrets, initializeState, readPins, readState,
 import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "../dev-stack-processes.mjs";
 import { readyResponse, reset, root } from "../dev-stack.mjs";
 
+/**
+ * Create a disposable checkout skeleton with the real dependency pins and remove it after the test.
+ */
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), "spaceapp-stack-test-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -112,7 +117,7 @@ test("dev-stack runtime environment isolates cookies, paths, workflows and inher
   assert.equal(env.OPENAI_API_KEY, undefined);
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.TMPDIR, join(state.runtime, "tmp"));
-  for (const key of ["HOME", "SPACE_MEMORY_ROOT", "SPACE_APP_DIAGNOSTICS_ROOT", "SPACE_PROJECTS_ROOT", "SPACE_INSTALL_ROOT", "SPACE_CODEX_HOME"]) assert.ok(env[key].startsWith(state.directory), key);
+  for (const key of ["HOME", "SPACE_MEMORY_ROOT", "SPACE_APP_DIAGNOSTICS_ROOT", "SPACE_PROJECTS_ROOT", "SPACE_INSTALL_ROOT", "SPACE_CODEX_HOME", "SPACE_LIVE_VOICE_LOG_ROOT", "SPACE_PLUGINS_ROOT", "SPACE_PERSONAL_GIT_ROOT", "SPACE_AGENT_FILE_DOCX_WORK_ROOT"]) assert.ok(env[key].startsWith(state.directory), key);
 });
 
 test("dev-stack runs real tsx watch IPC with a checkout/state path longer than Unix socket limits", async (t) => {
@@ -244,4 +249,76 @@ test("dev-stack reset preserves secrets and ownership state when Docker cleanup 
     assert.equal(ensureSecrets(state).password, secrets.password);
     assert.ok(readState(root, directory));
   } finally { process.env.PATH = previous; rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("dev-stack reauthenticates a process group before escalating shutdown", async (t) => {
+  const children = [0, 1].map(() => childProcess.spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" }));
+  const identities = children.map((child) => processIdentity(child.pid));
+  assert.ok(identities.every(Boolean));
+  const [managed, unrelated] = identities;
+  const original = childProcess.execFileSync;
+  const before = original("ps", ["-axo", "pid=,ppid=,pgid=,lstart=,stat="], { encoding: "utf8" });
+  // Model the owned group disappearing after TERM, followed by reuse of its
+  // numeric ID. No kernel PID recycling or real signal delivery is claimed.
+  const after = before.split("\n").filter((line) => Number(line.trim().split(/\s+/)[0]) !== managed.pid).map((line) => {
+    const fields = line.trim().split(/\s+/);
+    if (Number(fields[0]) === unrelated.pid) fields[2] = String(managed.pgid);
+    return fields.join(" ");
+  }).join("\n");
+  let terminated = false;
+  const signals = [];
+  try {
+    t.mock.method(childProcess, "execFileSync", (command, ...args) => command === "ps" ? (terminated ? after : before) : original(command, ...args));
+    syncBuiltinESMExports();
+    t.mock.method(process, "kill", (pid, signal) => {
+      signals.push({ pid, signal });
+      if (pid === -managed.pgid && signal === "SIGTERM") terminated = true;
+    });
+    await stopRecords([managed], 0);
+    assert.ok(terminated, "the owned group initially receives TERM");
+    assert.ok(!signals.some((entry) => entry.signal === "SIGKILL"), "never escalate against a reused, unauthenticated group");
+    assert.ok(!signals.some((entry) => entry.pid === unrelated.pid), "never signal the unrelated process individually");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await stopRecords(identities);
+  }
+});
+
+test("dev-stack preserves recovery identities when signal delivery is denied", async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  mkdirSync(join(state.directory, "logs"));
+  const runner = new ProcessSupervisor(state, {}, () => {});
+  const child = runner.start("denied-fixture", process.execPath, ["-e", "setInterval(()=>{},1000)"], {}, false);
+  const identity = processIdentity(child.pid);
+  const original = process.kill;
+  try {
+    t.mock.method(process, "kill", (pid, signal) => {
+      if (pid === -child.pid) throw Object.assign(new Error("permission denied fixture"), { code: "EPERM" });
+      return original(pid, signal);
+    });
+    await assert.rejects(runner.stop(), { code: "EPERM" });
+    assert.ok(readState(directory, state.directory).processes.some((record) => record.pid === identity.pid));
+    assert.ok(isSameProcess(identity), "denied cleanup must retain the live identity for recovery");
+  } finally {
+    t.mock.restoreAll();
+    await runner.stop();
+  }
+});
+
+test("dev-stack reports an executable startup failure and drains its child handle", async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  mkdirSync(join(state.directory, "logs"));
+  let notify;
+  const failure = new Promise((resolve) => { notify = resolve; });
+  const runner = new ProcessSupervisor(state, {}, notify);
+  try {
+    runner.start("missing-fixture", join(directory, "missing-executable"), []);
+    const error = await Promise.race([failure, delay(5000).then(() => { throw new Error("startup failure not reported"); })]);
+    assert.match(error.message, /missing-fixture could not start:.*ENOENT/);
+  } finally { await runner.stop(); }
+  assert.deepEqual(state.processes, []);
 });

@@ -136,7 +136,10 @@ symlink state paths are refused.
 The source stack supports the OpenCode terminal UI; opening it does not run an
 AI model probe or certify provider inference. Configure providers in its
 isolated home if needed. Other provider wrappers, browser service, optional
-companions, demo servers and root-only features stay disabled.
+companions, demo servers and root-only features stay disabled. Google OAuth
+configuration is disabled too; it cannot write credentials into an installed
+instance. Plugin data, personal Git workspaces, live audit logs and DOCX work files use
+private state paths; installed legacy history and personal memory are not imported; development plugin changes do not synchronize installed CLI skills.
 
 Platform notes and troubleshooting:
 

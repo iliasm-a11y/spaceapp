@@ -7,7 +7,9 @@ Semantic Versioning.
 
 - Add an isolated `npm run dev:stack` source workflow with Docker dependencies,
   owner setup, OpenCode terminal UI, hot reload, supervised lifecycle commands
-  and a disposable CI integration smoke check.
+  and a disposable CI integration smoke check. Authenticate process groups again
+  before shutdown escalation and keep plugin storage and OAuth configuration
+  isolated from an installed instance.
 
 ## [1.1.6] - 2026-10-16
 

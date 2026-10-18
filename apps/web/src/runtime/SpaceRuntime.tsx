@@ -81,6 +81,9 @@ export function resolveExternalResource(url: string): string | null {
 const apiDispatchers = new Map<PropertyKey, (...args: unknown[]) => unknown>();
 
 export const api = new Proxy({} as SpaceApiClient, {
+  /**
+   * Expose API methods lazily while allowing Fast Refresh to inspect branding before a runtime is installed.
+   */
   get(_target, property) {
     // React Fast Refresh inspects exported objects before the provider mounts.
     // Branding must not dispatch to an as-yet uninstalled API client.

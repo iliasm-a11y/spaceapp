@@ -12,9 +12,19 @@ import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "
 export const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
 const execute = promisify(execFile);
 const services = ["cli-host", "worker", "api", "web"];
+/**
+ * Prefix foreground lifecycle messages so readiness and failures are identifiable in CI transcripts.
+ */
 const log = (message) => console.log(`[dev:stack] ${message}`);
+/**
+ * Scope every Compose command to this stack's saved project and private generated definition.
+ */
 export const composeArgs = (state, args) => ["compose", "--project-directory", state.directory, "-p", state.project, "-f", join(state.directory, "compose.json"), ...args];
 
+/**
+ * Send an identity-bound lifecycle request over the private supervisor socket.
+ * Reject timeouts, truncated responses and supervisor errors instead of treating silence as success.
+ */
 export async function requestControl(state, command, timeout = 900_000) {
   return new Promise((resolve, reject) => {
     if (!state?.runtime) return reject(new Error("Stack has no supervisor socket."));
@@ -37,10 +47,16 @@ export async function requestControl(state, command, timeout = 900_000) {
   });
 }
 
+/**
+ * Require PostgreSQL, enabled Temporal workflows, worker and CLI host in a successful readiness payload.
+ */
 export function readyResponse(body) {
   return body?.ok === true && body.dependencies?.database === "RUNNING" && body.dependencies?.store === "postgres" && body.dependencies?.temporal === "enabled" && body.dependencies?.worker === "RUNNING" && body.dependencies?.cliHost === "RUNNING";
 }
 
+/**
+ * Verify full dependency readiness directly through the API and through the Vite proxy.
+ */
 async function ready(state) {
   for (const port of [state.ports.api, state.ports.web]) {
     const response = await fetch(`http://127.0.0.1:${port}/readyz`, { signal: AbortSignal.timeout(5000) });
@@ -48,6 +64,9 @@ async function ready(state) {
   }
 }
 
+/**
+ * Probe every configured loopback binding before startup; report the conflicting service and override.
+ */
 async function availablePorts(state) {
   for (const [name, port] of Object.entries(state.ports)) await new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -56,6 +75,10 @@ async function availablePorts(state) {
   });
 }
 
+/**
+ * Prepare private runtime files, seed memory and the isolated OpenCode wrapper.
+ * Repair only the local Darwin node-pty helper permission needed to launch a real terminal.
+ */
 function prepareFiles(state) {
   // node-pty 1.1.0's published Darwin prebuild can unpack its spawn-helper
   // without an executable bit. Keep the repair limited to this local dependency.
@@ -66,11 +89,14 @@ function prepareFiles(state) {
   // tsx also opens IPC sockets under TMPDIR. A checkout-relative temporary
   // directory can truncate/collide on Linux as well as exceeding macOS limits.
   mkdirSync(join(state.runtime, "tmp"), { recursive: true, mode: 0o700 });
-  for (const name of ["logs", "bin", "tools", "data/home", "data/memory", "data/workspaces", "data/artifacts", "data/projects", "data/dots"]) mkdirSync(join(state.directory, name), { recursive: true, mode: 0o700 });
+  for (const name of ["logs", "bin", "tools", "data/home", "data/memory", "data/workspaces", "data/artifacts", "data/projects", "data/dots", "data/live-voice-logs"]) mkdirSync(join(state.directory, name), { recursive: true, mode: 0o700 });
   for (const name of ["gemini_history.md", "gemini_history_monthly.md", "installation-guide.md"]) {
     const destination = join(state.directory, "data/memory", name);
     if (!existsSync(destination)) { copyFileSync(join(root, "starter-memory", name), destination); chmodSync(destination, 0o600); }
   }
+  /**
+   * Quote one executable path as a literal POSIX shell argument, including embedded apostrophes.
+   */
   const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
   const wrapper = join(state.directory, "bin/opencode-vscode-parity");
   writeFileSync(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "scripts/dev-stack-opencode.mjs"))} ${quote(state.directory)} "$@"\n`, { mode: 0o700 });
@@ -78,11 +104,17 @@ function prepareFiles(state) {
   privateFile(join(state.directory, "compose.json"), `${JSON.stringify(composeDefinition(state), null, 2)}\n`);
 }
 
+/**
+ * Stop this Compose project, optionally deleting its volumes; retain recovery files on any Docker failure.
+ */
 async function dockerDown(state, volumes = false) {
   if (!existsSync(join(state.directory, "compose.json"))) throw new Error("Compose recovery file is missing; preserving state.");
   await execute("docker", composeArgs(state, ["down", "--remove-orphans", ...(volumes ? ["--volumes"] : [])]), { timeout: 90_000 });
 }
 
+/**
+ * Check Docker project labels after cleanup; reject retained containers, networks or requested volumes.
+ */
 export async function assertDockerRemoved(state, volumes = true) {
   const filter = `label=com.docker.compose.project=${state.project}`;
   for (const args of [["ps", "-aq", "--filter", filter], ["network", "ls", "-q", "--filter", filter], ...(volumes ? [["volume", "ls", "-q", "--filter", filter]] : [])]) {
@@ -91,6 +123,10 @@ export async function assertDockerRemoved(state, volumes = true) {
   }
 }
 
+/**
+ * Ask a live supervisor to stop, or recover saved process trees and containers after a crash.
+ * Preserve data and propagate incomplete cleanup so reset cannot erase recovery state.
+ */
 export async function down(state) {
   if (!state) { log("No dev stack state exists."); return; }
   if (isSameProcess(state.controller)) {
@@ -108,6 +144,9 @@ export async function down(state) {
   log("Source processes and containers stopped; data retained.");
 }
 
+/**
+ * Revalidate ownership, stop services and verify Docker removal before deleting owned state and sockets.
+ */
 export async function reset(state) {
   if (!state) { log("No dev stack state exists."); return; }
   // Revalidate immediately before any deletion, including the external socket dir.
@@ -123,6 +162,10 @@ export async function reset(state) {
   log("Reset verified: no project containers, networks, volumes or managed processes remain.");
 }
 
+/**
+ * Start the foreground source stack after validating Node, Docker, ownership and available ports.
+ * Supervise setup, builds and all services; retain recovery state if shutdown cannot finish.
+ */
 export async function up(directory) {
   if (process.platform === "win32") throw new Error("Run the source stack inside Windows 11 WSL2, not native Windows.");
   if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Use the Node 22 version in .nvmrc, then ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci.");
@@ -146,6 +189,9 @@ export async function up(directory) {
   const sockets = new Set();
   let finish;
   const finished = new Promise((resolve) => { finish = resolve; });
+  /**
+   * Serialize shutdown requests, stop managed children and containers, and retain state on cleanup failure.
+   */
   const shutdown = (error) => {
     if (stopping) return stopping;
     failure ||= error;
@@ -166,6 +212,9 @@ export async function up(directory) {
     })();
     return stopping;
   };
+  /**
+   * Convert terminal signals into the same serialized cleanup used for child and readiness failures.
+   */
   const signalHandler = () => { void shutdown(); };
   process.once("SIGINT", signalHandler);
   process.once("SIGTERM", signalHandler);
@@ -180,7 +229,13 @@ export async function up(directory) {
     prepareFiles(state);
     const env = serviceEnvironment(state, secrets);
     supervisor = new ProcessSupervisor(state, secrets, (error) => { void shutdown(error); });
+    /**
+     * Run supervised build/install tasks with the active Node toolchain ahead of the inherited PATH.
+     */
     const runNpm = (name, args) => supervisor.run(name, "npm", args, { env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}` } });
+    /**
+     * Build workspace dependencies in order and compile the worker, aborting if shutdown has begun.
+     */
     const build = async () => {
       log("Building internal packages and the Temporal worker from this checkout...");
       for (const workspace of [...packageWorkspaces, "worker"]) {
@@ -188,6 +243,9 @@ export async function up(directory) {
         await runNpm(`build-${workspace}`, ["run", "build", "-w", `@space/${workspace}`]);
       }
     };
+    /**
+     * Start CLI host, worker, API watch and Vite, then wait for both direct and proxied readiness.
+     */
     const launch = async () => {
       supervisor.start("cli-host", process.execPath, ["packages/cli-host/dist/main.js"], { env });
       supervisor.start("worker", process.execPath, ["apps/worker/dist/worker.js"], { env });
@@ -295,6 +353,9 @@ export async function up(directory) {
   if (failure) throw failure;
 }
 
+/**
+ * Validate the lifecycle subcommand and dispatch it against the selected owned stack directory.
+ */
 export async function main(args = process.argv.slice(2)) {
   const [command = "up", ...extra] = args;
   if (extra.length || !["up", "down", "reset", "status", "verify", "rebuild", "help", "--help"].includes(command)) throw new Error("Usage: npm run dev:stack -- [up|down|reset|status|verify|rebuild]");
