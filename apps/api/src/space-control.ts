@@ -63,6 +63,11 @@ export function assertSecurityPolicy(spec: ControlAction): void {
     }
   }
 }
+/**
+ * Validate room/pane control actions against schemas and security policy before
+ * delegating integrations. Retain operation records and expose diagnostics
+ * through the supplied store, controller and publication callbacks.
+ */
 export function createSpaceControl(options:{store:SpaceStore;repository:ControlRepository;controller:RoomPaneController;
   phase?: 1 | 2;
   /** @deprecated Disconnected transient actions stay pending until an authenticated client is available. */

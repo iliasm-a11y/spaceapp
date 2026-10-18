@@ -93,3 +93,37 @@ it("keeps live-history audit files private and never imports installed legacy hi
     expect(vi.mocked(files.mkdir).mock.calls.every(([path]) => String(path).startsWith(directory))).toBe(true);
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+it("writes panes.open capacity incidents to the same private root used by diagnostics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dev-pane-incidents-"));
+  vi.stubEnv("SPACE_LIVE_VOICE_LOG_ROOT", directory);
+  const { createApp } = await import("../src/app.js");
+  const { cookieName, createCsrfToken, signSession } = await import("../src/auth.js");
+  const { createDecisionsService } = await import("../src/decisions-service.js");
+  const store = new InMemorySpaceStore();
+  const user = { id: "user:dev-incidents", role: "ADMIN" as const, email: "incidents@example.invalid" };
+  store.upsertUser(user);
+  const room = store.createRoom({ name: "Full dev room", initialPaneCount: 0 });
+  for (let index = 0; index < room.paneCap; index++) store.createPane({ roomId: room.id, title: `Occupied ${index}`, mode: "CHAT" });
+  const secret = "dev-incident-fixture-session";
+  const session = signSession(user, secret);
+  const app = await createApp({
+    store,
+    config: getApiConfig({ SPACE_LOG_LEVEL: "silent", SPACE_BROWSER_SESSIONS_ENABLED: "false", SPACE_GEMINI_MEMORY_INDEX_PATH: join(directory, "memory.md"), SPACE_GEMINI_MEMORY_MONTHLY_PATH: join(directory, "monthly.md") }),
+    auth: { sessionSecret: secret, devLogin: false, secureCookies: false },
+    decisionsService: createDecisionsService({ tokenFile: join(directory, "no-provider"), readFileImpl: async () => "", fetch: async () => { throw new Error("No model request is allowed in this fixture"); } }),
+  });
+  try {
+    const response = await app.inject({
+      method: "POST", url: "/api/control/v1/commands",
+      headers: { cookie: `${cookieName}=${session}`, "x-space-csrf-token": createCsrfToken(session, secret)! },
+      payload: { roomId: room.id, requestId: "dev-private-incident", actions: [{ kind: "resource", operation: "panes.open", input: { counts: { opencode: 1 }, debug: true } }] }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(JSON.stringify(response.json())).toContain("Room capacity exceeded");
+    await expect.poll(async () => {
+      const line = await files.readFile(join(directory, "debug-incidents.jsonl"), "utf8");
+      return JSON.parse(line.trim());
+    }).toMatchObject({ operation: "panes.open", roomId: room.id });
+  } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
+});
