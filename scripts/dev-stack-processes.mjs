@@ -209,6 +209,9 @@ export class ProcessSupervisor {
           }
           if (end === previous) break;
         }
+        // String offsets are UTF-16 code units; splitting a surrogate pair
+        // would turn a valid UTF-8 character into two replacement characters.
+        if (end > 0 && /[\uD800-\uDBFF]/.test(pending[end - 1]) && /[\uDC00-\uDFFF]/.test(pending[end] ?? "")) end--;
         if (end) { write(pending.slice(0, end)); pending = pending.slice(end); }
       });
       stream.on("end", () => { if (pending) write(pending); });

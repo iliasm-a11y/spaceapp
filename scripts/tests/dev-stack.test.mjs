@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -506,17 +507,32 @@ test("redteam: long newline-free output progresses while split secrets stay reda
   const runner = new ProcessSupervisor(state, { secret }, () => {});
   const path = join(state.directory, "logs/long-line.log");
   try {
-    runner.start("long-line", process.execPath, ["-e", `
+    const child = runner.start("long-line", process.execPath, ["-e", `
       process.stdout.write("x".repeat(65520) + ${JSON.stringify(secret.slice(0, 20))});
-      setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(20))} + "y".repeat(196608)), 50);
+      setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(20))} + "y".repeat(196608), () => process.send("written")), 50);
       setInterval(() => {}, 1000);
-    `], {}, false);
+    `], { stdio: ["ignore", "pipe", "pipe", "ipc"] }, false);
+    await once(child, "message", { signal: AbortSignal.timeout(3000) });
     for (let i = 0; i < 100 && (!existsSync(path) || statSync(path).size < 131072); i++) await delay(20);
     assert.ok(existsSync(path) && statSync(path).size >= 131072, "must flush a long line while its producer is still running");
   } finally { await runner.stop(); }
   const logged = readFileSync(path, "utf8");
   assert.equal(logged, "x".repeat(65520) + "[redacted]" + "y".repeat(196608));
   assert.ok(!logged.includes(secret));
+});
+
+test("redteam: bounded log flushing preserves Unicode characters across its boundary", { timeout: 10_000 }, async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const runner = new ProcessSupervisor(state, { secret: "a".repeat(64) }, () => {});
+  const path = join(state.directory, "logs/unicode.log");
+  try {
+    const child = runner.start("unicode", process.execPath, ["-e", "process.stdout.write('💫'.repeat(70000),()=>process.send('written')); setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "pipe", "ipc"] }, false);
+    await once(child, "message", { signal: AbortSignal.timeout(3000) });
+    for (let i = 0; i < 100 && (!existsSync(path) || statSync(path).size < 131072); i++) await delay(20);
+    assert.ok(existsSync(path) && statSync(path).size >= 131072);
+  } finally { await runner.stop(); }
+  assert.equal(readFileSync(path, "utf8"), "💫".repeat(70000));
 });
 
 for (const isolated of [true, false]) {
