@@ -96,7 +96,8 @@ Build failures stop the stack and retain logs and data for diagnosis.
 | `npm run dev:stack -- down` | Stop processes and containers, retain data |
 | `npm run dev:stack -- reset` | Stop and remove this stack's containers, volumes and state |
 
-Ctrl+C has the same stop behavior as `down`. Reset does not run Docker prune,
+Ctrl+C and terminal hangup (SIGHUP) have the same stop behavior as `down`.
+Reset does not run Docker prune,
 remove shared images or touch an installed SpaceApp. A failed Docker teardown
 keeps the ownership manifest and secrets so it can be retried.
 

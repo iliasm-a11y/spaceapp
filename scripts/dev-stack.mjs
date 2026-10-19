@@ -221,6 +221,7 @@ export async function up(directory) {
   const signalHandler = () => { void shutdown(); };
   process.once("SIGINT", signalHandler);
   process.once("SIGTERM", signalHandler);
+  process.once("SIGHUP", signalHandler);
   try {
     await stopRecords(state.processes);
     state.processes = [];
@@ -343,6 +344,7 @@ export async function up(directory) {
   finally {
     process.removeListener("SIGINT", signalHandler);
     process.removeListener("SIGTERM", signalHandler);
+    process.removeListener("SIGHUP", signalHandler);
     // Allow down's final response to drain, then close idle control clients.
     await delay(50);
     for (const socket of sockets) socket.destroy();

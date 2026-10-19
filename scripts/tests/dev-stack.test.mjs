@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { composeDefinition, ensureSecrets, initializeState, readPins, readState, resolvePorts, runtimeDirectory, saveState, serviceEnvironment, statePath } from "../dev-stack-state.mjs";
@@ -364,6 +365,80 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]
     assert.match(stderr, /Interrupted.*reset/);
   });
 }
+
+test("dev-stack foreground supervisor drains real detached children on SIGHUP", { timeout: 25_000 }, async (t) => {
+  const directory = fixture(t);
+  const stateDirectory = join(root, `.dev-stack-signal-${basename(directory)}`);
+  const env = { ...process.env };
+  const ports = new Set();
+  for (const name of ["API", "WEB", "POSTGRES", "TEMPORAL"]) {
+    let port;
+    do {
+      port = await new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close(() => resolve(value)); });
+      });
+    } while (ports.has(port) || [4910, 4911].includes(port));
+    ports.add(port);
+    env[`SPACE_DEV_${name}_PORT`] = String(port);
+  }
+  // Execute the actual up/shutdown/finally path and a real private control
+  // socket. Stub only Docker, build commands and HTTP readiness; launch four
+  // real detached Node children instead of a second complete application.
+  const child = childProcess.spawn(process.execPath, ["-e", `
+    const cp = require("node:child_process");
+    const fs = require("node:fs");
+    const { promisify } = require("node:util");
+    const docker = () => { throw new Error("Use the promisified Docker fixture"); };
+    docker[promisify.custom] = async () => ({ stdout: "", stderr: "" });
+    cp.execFile = docker;
+    require("node:module").syncBuiltinESMExports();
+    (async () => {
+      const { up } = await import(${JSON.stringify(join(root, "scripts/dev-stack.mjs"))});
+      const { ProcessSupervisor } = await import(${JSON.stringify(join(root, "scripts/dev-stack-processes.mjs"))});
+      const start = ProcessSupervisor.prototype.start;
+      ProcessSupervisor.prototype.run = async function() {};
+      ProcessSupervisor.prototype.start = function(name) {
+        return start.call(this, name, process.execPath, ["-e", "setInterval(()=>{},1000)"], { env: {} });
+      };
+      global.fetch = async () => ({ ok: true, json: async () => ({ ok: true, setupRequired: false, dependencies: { database: "RUNNING", store: "postgres", temporal: "enabled", worker: "RUNNING", cliHost: "RUNNING" } }) });
+      console.log = (...values) => {
+        if (values.some(value => String(value).includes("Stop: npm run dev:stack"))) {
+          process.send({ ready: true, processes: JSON.parse(fs.readFileSync(${JSON.stringify(join(stateDirectory, "manifest.json"))}, "utf8")).processes });
+        }
+      };
+      await up(${JSON.stringify(stateDirectory)});
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `], { cwd: root, env, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  const exited = once(child, "exit");
+  let records = [];
+  try {
+    const [message] = await once(child, "message", { signal: AbortSignal.timeout(10_000) });
+    assert.equal(message.ready, true, stderr);
+    records = message.processes;
+    assert.equal(records.length, 4);
+    assert.ok(records.every(record => isSameProcess(record)));
+    child.kill("SIGHUP");
+    const [code, signal] = await exited;
+    assert.equal(records.filter(record => isSameProcess(record)).length, 0, `SIGHUP left detached services alive (supervisor exit ${signal ?? code})`);
+    assert.equal(code, 0, stderr);
+    assert.equal(signal, null);
+    const saved = readState(root, stateDirectory);
+    assert.deepEqual(saved.processes, []);
+    assert.equal(saved.controller, null);
+    assert.equal(existsSync(join(stateDirectory, "supervisor.lock")), false);
+    assert.equal(existsSync(join(saved.runtime, "control.sock")), false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; }
+    const saved = readState(root, stateDirectory);
+    await stopRecords([...records, ...(saved?.processes ?? [])]);
+    if (saved?.runtime) { runtimeDirectory(saved); rmSync(saved.runtime, { recursive: true, force: true }); }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
 
 for (const legacy of [false, true]) {
   test(`dev-stack seeds canonical Space Memory files and preserves ${legacy ? "legacy content" : "source templates"}`, (t) => {
