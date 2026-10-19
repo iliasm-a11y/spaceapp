@@ -89,7 +89,7 @@ function frame(input: Partial<BrowserFrame> = {}): BrowserFrame {
     roomId: "room:browser-proof",
     status: "READY",
     viewport: "desktop",
-    currentUrl: "https://www.example.invalid/",
+    currentUrl: "https://www.google.com/",
     title: "Olla",
     screenshotDataUrl: "data:image/png;base64,aGVsbG8=",
     capturedAt: "2026-07-06T00:00:00.000Z",
@@ -99,7 +99,7 @@ function frame(input: Partial<BrowserFrame> = {}): BrowserFrame {
 
 function sessionResponse(input: Partial<PaneBrowserSessionResponse["session"]> = {}): PaneBrowserSessionResponse {
   const nextFrame = frame({
-    currentUrl: input.currentUrl ?? "https://www.example.invalid/",
+    currentUrl: input.currentUrl ?? "https://www.google.com/",
     title: input.title ?? "Olla",
     viewport: input.viewport ?? "desktop"
   });
@@ -113,8 +113,8 @@ function sessionResponse(input: Partial<PaneBrowserSessionResponse["session"]> =
       profileId: "profile:proof",
       profilePath: "/opt/spaceapp/var/artifacts/browser-profiles/room_browser-proof/pane_browser-proof/browser_session",
       viewport: "desktop",
-      targetUrl: "https://www.example.invalid/",
-      currentUrl: "https://www.example.invalid/",
+      targetUrl: "https://www.google.com/",
+      currentUrl: "https://www.google.com/",
       title: "Olla",
       status: "READY",
       statusReason: "Page ready.",
@@ -142,7 +142,7 @@ function sessionResponse(input: Partial<PaneBrowserSessionResponse["session"]> =
   };
 }
 
-function bookmark(id: string, title: string, url = "https://www.example.invalid/"): BrowserBookmark {
+function bookmark(id: string, title: string, url = "https://www.google.com/"): BrowserBookmark {
   return { id, title, url, addedAt: "2026-07-06T00:00:00.000Z" };
 }
 
@@ -284,7 +284,7 @@ describe("BrowserPane", () => {
     apiMock.browserStatus.mockResolvedValue({
       enabled: true,
       statusReason: "Managed Chrome browser sessions are enabled.",
-      defaultUrl: "https://www.example.invalid/",
+      defaultUrl: "https://www.google.com/",
       checkedAt: "2026-07-06T00:00:00.000Z"
     });
     apiMock.browserSession.mockRejectedValue(new Error("not found"));
@@ -658,6 +658,19 @@ describe("BrowserPane", () => {
     await screen.findByRole("button", { name: "Join browser session Research Browser" });
   });
 
+  it("drops browser control the server already gave back instead of failing the release", async () => {
+    apiMock.browserSession.mockResolvedValue(sessionResponse());
+    apiMock.acquireBrowserControl.mockResolvedValue(operatorLease());
+    apiMock.releaseBrowserControl.mockRejectedValue(Object.assign(new Error("A valid active control lease is required for interactive browser input."), { status: 409 }));
+    render(<BrowserPane pane={browserPane()} agentNumber={4} />);
+    const join = await screen.findByRole("button", { name: "Join browser session Research Browser" });
+    await waitFor(() => expect(join.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(join);
+    fireEvent.click(await screen.findByRole("button", { name: "Release browser control Research Browser" }));
+    await screen.findByRole("button", { name: "Join browser session Research Browser" });
+    expect(screen.queryByText(/valid active control lease/)).toBeNull();
+  });
+
   it("preserves the URL being typed while the initial browser session is loading", async () => {
     let ready!: (value: PaneBrowserSessionResponse) => void;
     apiMock.browserSession.mockImplementation(() => new Promise<PaneBrowserSessionResponse>(resolve => { ready = resolve; }));
@@ -710,12 +723,12 @@ describe("BrowserPane", () => {
 
   it("starts a stopped browser using the normalized address and shows useful invalid-address errors", async () => {
     const start = await closeLastBrowserTab();
-    apiMock.startBrowserSession.mockResolvedValue(sessionResponse({ targetUrl: "https://www.example.invalid/", currentUrl: "https://www.example.invalid/" }));
+    apiMock.startBrowserSession.mockResolvedValue(sessionResponse({ targetUrl: "https://www.google.com/", currentUrl: "https://www.google.com/" }));
     const input = screen.getByLabelText("Browser URL Research Browser") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "www.example.invalid" } });
+    fireEvent.change(input, { target: { value: "www.google.com" } });
     fireEvent.click(start);
-    await waitFor(() => expect(apiMock.startBrowserSession).toHaveBeenCalledWith("pane:browser-proof", expect.objectContaining({ targetUrl: "https://www.example.invalid/" })));
-    await waitFor(() => expect(input.value).toBe("https://www.example.invalid/"));
+    await waitFor(() => expect(apiMock.startBrowserSession).toHaveBeenCalledWith("pane:browser-proof", expect.objectContaining({ targetUrl: "https://www.google.com/" })));
+    await waitFor(() => expect(input.value).toBe("https://www.google.com/"));
     fireEvent.change(input, { target: { value: "https://" } });
     fireEvent.submit(input.closest("form")!);
     expect(await screen.findByText("Enter a valid web address, such as google.com.")).toBeTruthy();
@@ -743,7 +756,7 @@ describe("BrowserPane", () => {
     const nextStatus = {
       enabled: true,
       statusReason: "Managed Chrome browser sessions are enabled.",
-      defaultUrl: "https://www.example.invalid/",
+      defaultUrl: "https://www.google.com/",
       checkedAt: "2026-09-05T00:00:00.000Z"
     };
     let resolveStatus!: (status: typeof nextStatus) => void;
@@ -877,7 +890,7 @@ describe("BrowserPane", () => {
     apiMock.browserStatus.mockResolvedValue({
       enabled: true,
       statusReason: "ready",
-      defaultUrl: "https://www.example.invalid/",
+      defaultUrl: "https://www.google.com/",
       checkedAt: "2026-08-03T00:00:00.000Z"
     });
     apiMock.browserSession.mockResolvedValue(
@@ -1177,7 +1190,7 @@ describe("BrowserPane", () => {
       pageId: "page:one",
       kind: "PAGE" as const,
       title: "Olla",
-      url: "https://www.example.invalid/",
+      url: "https://www.google.com/",
       isActive: true,
       openerPageId: null,
       canGoBack: false,
@@ -1361,7 +1374,7 @@ describe("BrowserPane", () => {
           level: "ERROR",
           message: "GET /api failed",
           frameIndex: 0,
-          metadata: { method: "GET", url: "https://www.example.invalid/api", status: 500, durationMs: 42 },
+          metadata: { method: "GET", url: "https://www.google.com/api", status: 500, durationMs: 42 },
           occurredAt: "2026-07-11T00:00:02.000Z"
         }
       ]
