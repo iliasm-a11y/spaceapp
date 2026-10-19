@@ -24,10 +24,11 @@ function fixture(t) {
   return directory;
 }
 
-test("dev-stack process snapshots retain stable birth dates and zombie detection across caller locales", (t) => {
-  const previous = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, SPACE_DEV_PS_CANARY: process.env.SPACE_DEV_PS_CANARY };
+test("dev-stack process snapshots retain stable birth dates and zombie detection across caller locales and timezones", (t) => {
+  const previous = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TZ: process.env.TZ, SPACE_DEV_PS_CANARY: process.env.SPACE_DEV_PS_CANARY };
   process.env.LANG = "ja_JP.UTF-8";
   process.env.LC_ALL = "ja_JP.UTF-8";
+  process.env.TZ = "Pacific/Honolulu";
   process.env.SPACE_DEV_PS_CANARY = "keep-inherited-environment";
   let status = "S";
   try {
@@ -36,7 +37,7 @@ test("dev-stack process snapshots retain stable birth dates and zombie detection
       assert.deepEqual(args, ["-axo", "pid=,ppid=,pgid=,lstart=,stat="]);
       const env = options.env ?? process.env;
       assert.equal(env.SPACE_DEV_PS_CANARY, "keep-inherited-environment");
-      const birth = env.LC_ALL === "C" && env.LANG === "C" ? "Mon Oct 19 12:34:56 2026" : "月 10/19 12:34:56 2026";
+      const birth = env.LC_ALL !== "C" || env.LANG !== "C" ? "月 10/19 12:34:56 2026" : env.TZ === "UTC0" ? "Mon Oct 19 12:34:56 2026" : "Mon Oct 19 02:34:56 2026";
       return `${process.pid} 1 ${process.pid} ${birth} ${status}\n`;
     });
     syncBuiltinESMExports();
@@ -47,6 +48,7 @@ test("dev-stack process snapshots retain stable birth dates and zombie detection
     assert.equal(processIdentity(process.pid, processTable()), null);
     assert.equal(process.env.LC_ALL, "ja_JP.UTF-8");
     assert.equal(process.env.LANG, "ja_JP.UTF-8");
+    assert.equal(process.env.TZ, "Pacific/Honolulu");
   } finally {
     t.mock.restoreAll();
     syncBuiltinESMExports();
