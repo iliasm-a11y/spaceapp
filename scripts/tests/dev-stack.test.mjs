@@ -9,7 +9,7 @@ import { basename, join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { composeDefinition, ensureSecrets, initializeState, readPins, readState, resolvePorts, runtimeDirectory, saveState, serviceEnvironment, statePath } from "../dev-stack-state.mjs";
-import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "../dev-stack-processes.mjs";
+import { isSameProcess, processIdentity, processTable, ProcessSupervisor, stopRecords } from "../dev-stack-processes.mjs";
 import { prepareFiles, readyResponse, reset, root } from "../dev-stack.mjs";
 
 /**
@@ -23,6 +23,38 @@ function fixture(t) {
   writeFileSync(join(directory, "Dockerfile"), readFileSync(join(root, "Dockerfile")));
   return directory;
 }
+
+test("dev-stack process snapshots retain stable birth dates and zombie detection across caller locales", (t) => {
+  const previous = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, SPACE_DEV_PS_CANARY: process.env.SPACE_DEV_PS_CANARY };
+  process.env.LANG = "ja_JP.UTF-8";
+  process.env.LC_ALL = "ja_JP.UTF-8";
+  process.env.SPACE_DEV_PS_CANARY = "keep-inherited-environment";
+  let status = "S";
+  try {
+    t.mock.method(childProcess, "execFileSync", (command, args, options) => {
+      assert.equal(command, "ps");
+      assert.deepEqual(args, ["-axo", "pid=,ppid=,pgid=,lstart=,stat="]);
+      const env = options.env ?? process.env;
+      assert.equal(env.SPACE_DEV_PS_CANARY, "keep-inherited-environment");
+      const birth = env.LC_ALL === "C" && env.LANG === "C" ? "Mon Oct 19 12:34:56 2026" : "月 10/19 12:34:56 2026";
+      return `${process.pid} 1 ${process.pid} ${birth} ${status}\n`;
+    });
+    syncBuiltinESMExports();
+    const [live] = processTable();
+    assert.equal(live.start, "Mon Oct 19 12:34:56 2026");
+    assert.equal(live.stat, "S");
+    status = "Z";
+    assert.equal(processIdentity(process.pid, processTable()), null);
+    assert.equal(process.env.LC_ALL, "ja_JP.UTF-8");
+    assert.equal(process.env.LANG, "ja_JP.UTF-8");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
 
 test("dev-stack validates ports strictly, forbids installed ports and rejects duplicate bindings", () => {
   assert.deepEqual(resolvePorts({}), { api: 5910, web: 5911, postgres: 55432, temporal: 57233 });

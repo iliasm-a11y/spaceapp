@@ -11,7 +11,8 @@ Semantic Versioning.
   before shutdown escalation and keep plugin storage and OAuth configuration
   isolated from an installed instance. Refuse linked private state, bound partial
   log lines without exposing generated secrets, and disable Vite dotenv loading
-  for the isolated stack. Clean up detached services on terminal hangup too.
+  for the isolated stack. Clean up detached services on terminal hangup too,
+  with process identities stable across contributor locales.
 
 ## [1.1.6] - 2026-10-18
 

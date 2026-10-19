@@ -6,10 +6,10 @@ import { privateDirectory, privateFileStat, saveState } from "./dev-stack-state.
 
 /**
  * Read PID, parent, group, birth time and state using the ps fields shared by Linux and macOS.
- * Zombies are retained in this snapshot so identity checks can explicitly reject them.
+ * Use the C locale for stable birth columns; retain zombies so identity checks can explicitly reject them.
  */
 export function processTable() {
-  const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,lstart=,stat="], { encoding: "utf8" });
+  const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid=,lstart=,stat="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" } });
   return output.trim().split("\n").filter(Boolean).map((line) => {
     const fields = line.trim().split(/\s+/);
     return { pid: Number(fields[0]), ppid: Number(fields[1]), pgid: Number(fields[2]), start: fields.slice(3, 8).join(" "), stat: fields[8] };
