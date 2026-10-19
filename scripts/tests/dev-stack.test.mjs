@@ -8,7 +8,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { composeDefinition, ensureSecrets, initializeState, readPins, readState, resolvePorts, runtimeDirectory, saveState, serviceEnvironment, statePath } from "../dev-stack-state.mjs";
 import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "../dev-stack-processes.mjs";
-import { readyResponse, reset, root } from "../dev-stack.mjs";
+import { prepareFiles, readyResponse, reset, root } from "../dev-stack.mjs";
 
 /**
  * Create a disposable checkout skeleton with the real dependency pins and remove it after the test.
@@ -361,5 +361,35 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]
     paths.forEach((path, index) => assert.equal(readFileSync(path, "utf8"), originals[index]));
     assert.deepEqual(result, { code, signal: null });
     assert.match(stderr, /Interrupted.*reset/);
+  });
+}
+
+for (const legacy of [false, true]) {
+  test(`dev-stack seeds canonical Space Memory files and preserves ${legacy ? "legacy content" : "source templates"}`, (t) => {
+    const directory = fixture(t);
+    const state = initializeState(directory, statePath(directory, {}), {});
+    runtimeDirectory(state);
+    t.after(() => rmSync(state.runtime, { recursive: true, force: true }));
+    const memory = join(state.directory, "data/memory");
+    mkdirSync(memory, { recursive: true });
+    if (legacy) {
+      writeFileSync(join(memory, "gemini_history.md"), "existing private index\n");
+      writeFileSync(join(memory, "gemini_history_monthly.md"), "existing monthly history\n");
+    }
+    prepareFiles(state);
+    const env = serviceEnvironment(state, ensureSecrets(state));
+    for (const [file, key, content] of [
+      ["space_memory.md", "SPACE_MEMORY_INDEX_PATH", "existing private index\n"],
+      ["space_memory_monthly.md", "SPACE_MEMORY_MONTHLY_PATH", "existing monthly history\n"]
+    ]) {
+      const path = join(memory, file);
+      assert.equal(env[key], path);
+      assert.equal(readFileSync(path, "utf8"), legacy ? content : readFileSync(join(root, "starter-memory", file), "utf8"));
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      writeFileSync(path, "subsequent user edit\n");
+    }
+    prepareFiles(state);
+    for (const file of ["space_memory.md", "space_memory_monthly.md"]) assert.equal(readFileSync(join(memory, file), "utf8"), "subsequent user edit\n");
+    if (legacy) assert.equal(readFileSync(join(memory, "gemini_history.md"), "utf8"), "existing private index\n");
   });
 }

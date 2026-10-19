@@ -117,6 +117,11 @@ npm run dev:stack -- verify
 npm run dev:stack -- down
 ```
 
+Space Memory uses the current `space_memory.md` and `space_memory_monthly.md`
+templates. When upgrading an existing dev state, its older `gemini_history*.md`
+files are copied to those names only if the new files are absent; private edits
+and the old files are retained. No installed-instance memory is imported.
+
 The ignored `.dev-stack/` directory owns the database secrets (0600), provider
 homes, wrappers, logs and tools. Temporal receives its password through a 0600
 Compose environment file so no world-readable secret mount is needed. A unique

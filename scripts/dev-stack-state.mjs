@@ -221,7 +221,7 @@ export function serviceEnvironment(state, secrets, base = process.env) {
     SPACE_CLI_COMMAND_PATH: join(state.directory, "bin"), SPACE_CLI_WORKSPACE_ROOT: data("workspaces"),
     SPACE_ARTIFACT_ROOT: data("artifacts"), SPACE_WORKFLOW_ARTIFACTS_ROOT: data("artifacts"), SPACE_MEMORY_ROOT: memory,
     SPACE_STARTER_MEMORY_ROOT: join(state.root, "starter-memory"), SPACE_MEMORY_GRAPH_ROOT: data("memory-graph"),
-    SPACE_GEMINI_MEMORY_INDEX_PATH: join(memory, "gemini_history.md"), SPACE_GEMINI_MEMORY_MONTHLY_PATH: join(memory, "gemini_history_monthly.md"), SPACE_GEMINI_MEMORY_LOCK_PATH: join(memory, ".memory.lock"),
+    SPACE_MEMORY_INDEX_PATH: join(memory, "space_memory.md"), SPACE_MEMORY_MONTHLY_PATH: join(memory, "space_memory_monthly.md"), SPACE_MEMORY_LOCK_PATH: join(memory, ".memory.lock"),
     SPACE_APP_DIAGNOSTICS_ROOT: data("app-diagnostics"), SPACE_MAINTENANCE_AUTOPILOT_STATE_FILE: data("maintenance", "state.json"), SPACE_CLI_ACCOUNT_BALANCER_STATE_FILE: data("account-balancer", "state.json"),
     SPACE_TELEGRAM_SECRET_ROOT: data("telegram"), SPACE_TELEGRAM_OWNERSHIP_MANIFEST: data("integrations", "telegram.json"), SPACE_STREAMING_SECRET_ROOT: data("streaming-secrets"),
     SPACE_CODEX_HOME: data("providers", "codex"), SPACE_CODEX_APP_SERVER_HOME: data("providers", "codex"), SPACE_CODEX_GOALS_DB_PATH: data("codex-goals.sqlite"), SPACE_CODEX_CLI_MODE_DEFAULTS_PROJECTION_PATH: data("codex-defaults.json"),

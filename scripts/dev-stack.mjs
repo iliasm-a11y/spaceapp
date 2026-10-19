@@ -79,7 +79,7 @@ async function availablePorts(state) {
  * Prepare private runtime files, seed memory and the isolated OpenCode wrapper.
  * Repair only the local Darwin node-pty helper permission needed to launch a real terminal.
  */
-function prepareFiles(state) {
+export function prepareFiles(state) {
   // node-pty 1.1.0's published Darwin prebuild can unpack its spawn-helper
   // without an executable bit. Keep the repair limited to this local dependency.
   if (process.platform === "darwin") {
@@ -90,9 +90,14 @@ function prepareFiles(state) {
   // directory can truncate/collide on Linux as well as exceeding macOS limits.
   mkdirSync(join(state.runtime, "tmp"), { recursive: true, mode: 0o700 });
   for (const name of ["logs", "bin", "tools", "data/home", "data/memory", "data/workspaces", "data/artifacts", "data/projects", "data/dots", "data/live-voice-logs"]) mkdirSync(join(state.directory, name), { recursive: true, mode: 0o700 });
-  for (const name of ["gemini_history.md", "gemini_history_monthly.md", "installation-guide.md"]) {
+  for (const [name, legacy] of [["space_memory.md", "gemini_history.md"], ["space_memory_monthly.md", "gemini_history_monthly.md"], ["installation-guide.md", null]]) {
     const destination = join(state.directory, "data/memory", name);
-    if (!existsSync(destination)) { copyFileSync(join(root, "starter-memory", name), destination); chmodSync(destination, 0o600); }
+    const previous = legacy && join(state.directory, "data/memory", legacy);
+    if (!existsSync(destination)) {
+      // Upgrade only this stack's old private files; never overwrite edits or read an installed instance.
+      copyFileSync(previous && existsSync(previous) ? previous : join(root, "starter-memory", name), destination);
+      chmodSync(destination, 0o600);
+    }
   }
   /**
    * Quote one executable path as a literal POSIX shell argument, including embedded apostrophes.
