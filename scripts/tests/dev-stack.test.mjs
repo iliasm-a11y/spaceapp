@@ -444,6 +444,20 @@ test("redteam: hard-linked secrets cannot change an outside file's permissions",
   assert.equal(readFileSync(outside, "utf8"), "a".repeat(64));
 });
 
+test("redteam: the OpenCode wrapper refuses a linked provider home before creating account data", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const outside = join(directory, "outside-provider");
+  mkdirSync(outside, { mode: 0o755 });
+  mkdirSync(join(state.directory, "data"));
+  symlinkSync(outside, join(state.directory, "data/providers"));
+  const result = childProcess.spawnSync(process.execPath, [join(root, "scripts/dev-stack-opencode.mjs"), state.directory, "inspect-env"], { encoding: "utf8", timeout: 5000 });
+  assert.notEqual(result.status, 0, "refuse unsafe provider state even for a diagnostic command");
+  assert.match(result.stderr, /private directory/);
+  assert.deepEqual(readdirSync(outside), []);
+  assert.equal(statSync(outside).mode & 0o777, 0o755);
+});
+
 for (const kind of ["symlink", "hardlink"]) {
   test(`redteam: supervision refuses a ${kind} log before launching a child`, async (t) => {
     const directory = fixture(t);

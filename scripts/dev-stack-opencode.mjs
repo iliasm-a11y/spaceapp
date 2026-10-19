@@ -2,20 +2,21 @@
 // This host-only wrapper intentionally supports OpenCode alone. It never reads
 // the user's provider home or runs a paid model probe to open a terminal UI.
 import { spawn } from "node:child_process";
-import { mkdirSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { privateDirectory } from "./dev-stack-state.mjs";
 
 const [state, ...input] = process.argv.slice(2);
 const args = input[0] === "--run-inner" ? input.slice(1) : input;
 const tool = join(state, "tools", "node_modules", ".bin", "opencode");
-const home = join(state, "data", "providers", "opencode");
+const home = privateDirectory(state, "data/providers/opencode");
 const env = {};
 for (const key of ["PATH", "LANG", "LC_ALL", "TERM", "COLORTERM", "USER", "LOGNAME", "SPACE_CLI_WORKSPACE", "SPACE_ROOM_ID", "SPACE_PANE_ID", "SPACE_CLI_SESSION_ID"]) if (process.env[key]) env[key] = process.env[key];
 Object.assign(env, {
   HOME: home, TMPDIR: join(home, "tmp"), XDG_CONFIG_HOME: join(home, "config"), XDG_DATA_HOME: join(home, "data"), XDG_CACHE_HOME: join(home, "cache"), XDG_STATE_HOME: join(home, "state"),
   OPENCODE_DISABLE_AUTOUPDATE: "true"
 });
-for (const path of [env.HOME, env.TMPDIR, env.XDG_CONFIG_HOME, env.XDG_DATA_HOME, env.XDG_CACHE_HOME, env.XDG_STATE_HOME]) mkdirSync(path, { recursive: true, mode: 0o700 });
+for (const name of ["tmp", "config", "data", "cache", "state"]) privateDirectory(home, name);
 
 switch (args[0]) {
   case "credential-status":
