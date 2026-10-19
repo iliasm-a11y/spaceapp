@@ -76,6 +76,10 @@ const google: MailCopilotGoogleAccess = {
   async googleAccessToken(_owner, email) { if (email !== "me@gmail.com") throw new Error("not allowed"); return "token-me"; }
 };
 
+/**
+ * Build an isolated injected API with fake Google/Gmail responses and a deterministic repository clock.
+ * Return owner/agent credentials and a pane-scoped sync helper; temporary roots are tracked for cleanup.
+ */
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "space-mail-copilot-sync-"));
   temporaryRoots.push(root);

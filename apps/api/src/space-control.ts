@@ -1648,6 +1648,11 @@ export function createSpaceControl(options:{store:SpaceStore;repository:ControlR
     };
   }
 
+  /**
+   * Collect selected control-tool probe results in the caller's actor context with bounded waits.
+   * Skipped proofs produce WARN rather than a success claim; failures are recorded best-effort
+   * in the configured incident directory and returned with a diagnostic handoff prompt.
+   */
   async function testMcpTools(actor: ControlActor, targetRoomId?: string, params?: { tools?: string[]; fast?: boolean }) {
     let effectiveRoomId = targetRoomId;
     if (!effectiveRoomId) {
@@ -1943,6 +1948,11 @@ export function createSpaceControl(options:{store:SpaceStore;repository:ControlR
     };
   }
 
+  /**
+   * Summarize room capacity, disabled runtimes and recent configured incident-log entries.
+   * Fall back to the first listed room when none is selected; return diagnostic advice
+   * without repairing state or interrupting running panes.
+   */
   async function runDebug(actor: ControlActor, targetRoomId?: string, opName?: string, paneId?: string, query?: string) {
     let effectiveRoomId = targetRoomId;
     if (!effectiveRoomId) {

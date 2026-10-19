@@ -28,6 +28,10 @@ afterEach(async () => {
   app = undefined;
 });
 
+/**
+ * Build a per-test API around the supplied store and controlled worker-readiness snapshot.
+ * Environment overrides exercise readiness branches; afterEach closes the retained instance.
+ */
 async function build(store: InMemorySpaceStore, env: NodeJS.ProcessEnv = {}) {
   app = await createApp({
     store,

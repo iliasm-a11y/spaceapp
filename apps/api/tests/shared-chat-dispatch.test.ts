@@ -19,6 +19,10 @@ function createIdleDeepseekPane(store: InMemorySpaceStore, title: string) {
   return { room, pane };
 }
 
+/**
+ * Seed a running session at the requested Date-only fixture time so target selection cannot tie by chance.
+ * Restore the real clock in finally while preserving the timers used by the surrounding tests.
+ */
 function createRunningSession(store: InMemorySpaceStore, roomId: string, paneId: string, runtimeId: string, updatedAt: string) {
   const sessionId = makeSpaceId("cli_session");
   // The store stamps its own time; input.updatedAt is not a clock override.
