@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { join, resolve, dirname, basename } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve, dirname, basename, relative, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 export const defaultPorts = { api: 5910, web: 5911, postgres: 55432, temporal: 57233 };
@@ -50,19 +50,51 @@ export function resolvePorts(env = process.env) {
 export function statePath(root, env = process.env) {
   const requested = resolve(root, env.SPACE_DEV_STATE_DIR || ".dev-stack");
   if (dirname(requested) !== root || !/^\.dev-stack(?:-[a-zA-Z0-9_-]+)?$/.test(basename(requested))) throw new Error("SPACE_DEV_STATE_DIR must be .dev-stack or a sibling .dev-stack-NAME in this checkout.");
-  if (existsSync(requested) && (lstatSync(requested).isSymbolicLink() || !lstatSync(requested).isDirectory())) throw new Error("Refusing a symlink or non-directory dev state path.");
+  const stat = lstatSync(requested, { throwIfNoEntry: false });
+  if (stat && (!stat.isDirectory() || stat.uid !== process.getuid())) throw new Error("Refusing a symlink, non-directory or foreign-owned dev state path.");
   return requested;
 }
 
 /**
- * Atomically replace a regular private file with mode 0600, refusing symlink destinations.
+ * Inspect a private file without following links, rejecting shared inodes and other owners before reads or chmod.
+ * @returns {import("node:fs").Stats | undefined} The validated file, or undefined when absent (including no adoption).
  */
-export function privateFile(path, content) {
-  if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error(`Expected a regular private file: ${basename(path)}`);
+export function privateFileStat(path, description = "private file") {
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat && (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid())) throw new Error(`Expected an owned, unlinked ${description}: ${basename(path)}`);
+  return stat;
+}
+
+/**
+ * Create private directories one component at a time under a trusted root, refusing links before chmod or traversal.
+ * This protects stale/tampered local state; it is not a sandbox against concurrent code running as the same user.
+ */
+export function privateDirectory(directory, name = "") {
+  const target = resolve(directory, name);
+  const suffix = relative(directory, target);
+  if (isAbsolute(suffix) || suffix === ".." || suffix.startsWith(`..${sep}`)) throw new Error("Private directory must stay inside its owned root.");
+  let path = directory;
+  for (const part of ["", ...(suffix ? suffix.split(sep) : [])]) {
+    path = join(path, part);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat && (!stat.isDirectory() || stat.uid !== process.getuid())) throw new Error(`Refusing linked, non-directory or foreign-owned private directory: ${path}`);
+    if (!stat) mkdirSync(path, { mode: 0o700 });
+    chmodSync(path, 0o700);
+  }
+  return target;
+}
+
+/**
+ * Atomically replace an owned single-link private file, defaulting to 0600; executable wrappers explicitly use 0700.
+ */
+export function privateFile(path, content, mode = 0o600) {
+  privateFileStat(path);
   const temporary = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
+  try {
+    writeFileSync(temporary, content, { mode, flag: "wx" });
+    chmodSync(temporary, mode);
+    renameSync(temporary, path);
+  } finally { rmSync(temporary, { force: true }); }
 }
 
 /**
@@ -71,8 +103,8 @@ export function privateFile(path, content) {
  */
 export function readState(root, directory) {
   const path = join(directory, "manifest.json");
-  if (!existsSync(path)) return null;
-  if (lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) throw new Error("Refusing a symlink or non-file manifest.");
+  statePath(root, { SPACE_DEV_STATE_DIR: directory });
+  if (!privateFileStat(path)) return null;
   const state = JSON.parse(readFileSync(path, "utf8"));
   const project = `spaceapp-dev-${createHash("sha256").update(directory).digest("hex").slice(0, 12)}`;
   if (state.version !== 1 || state.root !== root || state.directory !== directory || state.project !== project || !/^[a-f0-9]{32}$/.test(state.id)) throw new Error("State manifest does not belong to this checkout; refusing to adopt or remove it.");
@@ -87,7 +119,7 @@ export function readState(root, directory) {
 export function initializeState(root, directory, env = process.env) {
   const saved = readState(root, directory);
   if (saved) {
-    chmodSync(directory, 0o700);
+    privateDirectory(directory);
     for (const name of Object.keys(defaultPorts)) {
       const key = `SPACE_DEV_${name.toUpperCase()}_PORT`;
       if (env[key] !== undefined && Number(env[key]) !== saved.ports[name]) throw new Error(`${key} differs from saved state; reset this stack before changing ports.`);
@@ -95,8 +127,7 @@ export function initializeState(root, directory, env = process.env) {
     return saved;
   }
   if (existsSync(directory) && readdirSync(directory).length) throw new Error("State directory is not empty and has no ownership manifest; refusing to adopt it.");
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
+  privateDirectory(directory);
   const state = { version: 1, root, directory, id: randomBytes(16).toString("hex"), ports: resolvePorts(env), project: `spaceapp-dev-${createHash("sha256").update(directory).digest("hex").slice(0, 12)}`, pins: readPins(root), processes: [] };
   saveState(state);
   return state;
@@ -105,19 +136,26 @@ export function initializeState(root, directory, env = process.env) {
 /**
  * Persist the recovery manifest atomically with private permissions after process or runtime changes.
  */
-export function saveState(state) { privateFile(join(state.directory, "manifest.json"), `${JSON.stringify(state, null, 2)}\n`); }
+export function saveState(state) {
+  privateDirectory(state.directory);
+  privateFile(join(state.directory, "manifest.json"), `${JSON.stringify(state, null, 2)}\n`);
+}
 
 /**
  * Reuse a verified owned temporary directory or create a short private directory for Unix sockets.
  * Ownership is checked again before reset may delete this directory outside the checkout.
  */
 export function runtimeDirectory(state) {
-  if (state.runtime && existsSync(state.runtime)) {
+  if (state.runtime && lstatSync(state.runtime, { throwIfNoEntry: false })) {
     if (!/^spaceapp-dev-[a-zA-Z0-9]+$/.test(basename(state.runtime))) throw new Error("Invalid runtime directory name.");
     const marker = join(state.runtime, "owner.json");
     const allowedParents = [realpathSync(tmpdir()), realpathSync("/tmp")];
     if (!allowedParents.includes(realpathSync(dirname(state.runtime)))) throw new Error("Runtime directory must be in the system temporary directory.");
-    if (existsSync(marker) && !lstatSync(state.runtime).isSymbolicLink() && JSON.parse(readFileSync(marker, "utf8")).id === state.id) return state.runtime;
+    const stat = lstatSync(state.runtime);
+    if (stat.isDirectory() && stat.uid === process.getuid() && privateFileStat(marker) && JSON.parse(readFileSync(marker, "utf8")).id === state.id) {
+      privateDirectory(state.runtime);
+      return state.runtime;
+    }
     throw new Error("Runtime directory ownership check failed; preserving state for inspection.");
   }
   // macOS socket paths are limited to about 104 bytes. Keep sockets outside deep checkouts.
@@ -135,17 +173,13 @@ export function runtimeDirectory(state) {
  * The password reaches Temporal via Compose env_file, without weakening its file permissions.
  */
 export function ensureSecrets(state) {
-  const directory = join(state.directory, "secrets");
-  if (existsSync(directory) && lstatSync(directory).isSymbolicLink()) throw new Error("Refusing symlink secrets directory.");
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
+  const directory = privateDirectory(state.directory, "secrets");
   /**
-   * Read or generate a 64-hex-character secret, refusing symlinks and restoring mode 0600.
+   * Read or generate a 64-hex-character secret, refusing links and restoring mode 0600 only on owned files.
    */
   const secret = (name) => {
     const path = join(directory, name);
-    if (!existsSync(path)) privateFile(path, `${randomBytes(32).toString("hex")}\n`);
-    if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error(`Invalid secret file: ${name}`);
+    if (!privateFileStat(path, "secret file")) privateFile(path, `${randomBytes(32).toString("hex")}\n`);
     chmodSync(path, 0o600);
     const value = readFileSync(path, "utf8").trim();
     if (!/^[a-f0-9]{64}$/.test(value)) throw new Error(`Invalid secret content: ${name}`);

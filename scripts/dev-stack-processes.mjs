@@ -1,8 +1,8 @@
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { saveState } from "./dev-stack-state.mjs";
+import { privateDirectory, privateFileStat, saveState } from "./dev-stack-state.mjs";
 
 /**
  * Read PID, parent, group, birth time and state using the ps fields shared by Linux and macOS.
@@ -131,7 +131,8 @@ export class ProcessSupervisor {
    */
   constructor(state, secrets, onFailure) {
     this.state = state;
-    this.redactions = Object.values(secrets).filter(Boolean);
+    this.redactions = Object.values(secrets).filter(Boolean).sort((a, b) => b.length - a.length);
+    this.redactionTail = Math.max(0, ...this.redactions.map((secret) => secret.length - 1));
     this.onFailure = onFailure;
     this.expected = new Set();
     this.children = new Map();
@@ -162,12 +163,22 @@ export class ProcessSupervisor {
 
   /**
    * Spawn a detached service and persist its identity before tracking descendants.
-   * Buffer each output stream by line so secrets split across chunks are redacted in private logs.
+   * Hold an owned log descriptor and bound each stream's partial line, retaining split secrets for redaction.
    * @returns {import("node:child_process").ChildProcess} The child, whose unexpected exit is supervised.
    */
   start(name, command, args, options = {}, required = true) {
-    const log = join(this.state.directory, "logs", `${name}.log`);
-    const child = spawn(command, args, { cwd: this.state.root, stdio: ["ignore", "pipe", "pipe"], detached: true, ...options });
+    if (!/^[a-zA-Z0-9-]+$/.test(name)) throw new Error("Invalid private log name.");
+    const log = join(privateDirectory(this.state.directory, "logs"), `${name}.log`);
+    privateFileStat(log);
+    const descriptor = openSync(log, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    let child;
+    try {
+      const stat = fstatSync(descriptor);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid()) throw new Error("Expected an owned single-link private log.");
+      fchmodSync(descriptor, 0o600);
+      child = spawn(command, args, { cwd: this.state.root, stdio: ["ignore", "pipe", "pipe"], detached: true, ...options });
+    } catch (error) { closeSync(descriptor); throw error; }
+    child.once("close", () => closeSync(descriptor));
     const record = child.pid ? { name, ...processIdentity(child.pid) } : null;
     if (record?.pid) {
       this.state.processes.push(record);
@@ -180,13 +191,25 @@ export class ProcessSupervisor {
        */
       const write = (value) => {
         for (const secret of this.redactions) value = value.replaceAll(secret, "[redacted]");
-        appendFileSync(log, value, { mode: 0o600 });
+        writeFileSync(descriptor, value);
       };
       stream.setEncoding("utf8");
       stream.on("data", (chunk) => {
         pending += chunk;
-        const end = pending.lastIndexOf("\n");
-        if (end >= 0) { write(pending.slice(0, end + 1)); pending = pending.slice(end + 1); }
+        let end = pending.lastIndexOf("\n") + 1;
+        // Generated credentials have no newlines. For a long partial line, keep
+        // enough lookahead to recognize a secret split across the next chunk.
+        if (!end && pending.length > 65_536 + this.redactionTail) end = pending.length - this.redactionTail;
+        // Never cut a known complete match in half at the flush boundary.
+        for (;;) {
+          const previous = end;
+          for (const secret of this.redactions) {
+            const start = pending.lastIndexOf(secret, end - 1);
+            if (start >= 0 && start < end && start + secret.length > end) end = start;
+          }
+          if (end === previous) break;
+        }
+        if (end) { write(pending.slice(0, end)); pending = pending.slice(end); }
       });
       stream.on("end", () => { if (pending) write(pending); });
     }

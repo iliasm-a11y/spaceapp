@@ -128,6 +128,11 @@ Compose environment file so no world-readable secret mount is needed. A unique
 Compose project is derived from the state path. `SPACE_INSTANCE=dev` isolates
 the session cookie and disables background jobs that act on external systems.
 Installed `SPACE_*` configuration and provider account keys are not inherited.
+Vite dotenv loading is disabled for the isolated stack; standalone Web development
+keeps its normal dotenv behavior. Managed state directories refuse symbolic links,
+and private files refuse symbolic links, hard links and foreign owners before use.
+Logs use owned 0600 file descriptors; long lines are flushed with bounded buffering
+while generated secrets remain redacted, even across output chunks.
 Short, private temporary directories for CLI/control sockets and tsx IPC are
 recorded in the manifest and removed by reset. Keeping `TMPDIR` short also
 prevents truncated Unix socket paths from colliding in deep Linux checkouts.
@@ -137,6 +142,11 @@ For another disposable stack set `SPACE_DEV_STATE_DIR=.dev-stack-NAME` on
 inside this checkout are accepted, preventing reset from adopting an arbitrary
 folder. Existing nonempty directories without an ownership manifest and
 symlink state paths are refused.
+
+Run only a trusted checkout: build scripts, Docker and source services execute with
+your user's privileges. These isolation checks protect installed data and reject
+unsafe existing state; they do not sandbox arbitrary source code or concurrent
+filesystem changes made by another process running as your user.
 
 The source stack supports the OpenCode terminal UI; opening it does not run an
 AI model probe or certify provider inference. Configure providers in its

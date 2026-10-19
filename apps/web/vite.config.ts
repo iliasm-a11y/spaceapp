@@ -18,6 +18,8 @@ export function manualChunkForModule(moduleId: string): string | undefined {
 }
 
 export default defineConfig({
+  // Source-stack services must not import an installed/provider account through checkout dotenv files.
+  envDir: process.env.SPACE_INSTANCE === "dev" ? false : undefined,
   plugins: [react(), demoBundleBoundaryPlugin(), retainOpenTabAssets()],
   // The icon package ships as source; the alias keeps worktrees (which share live node_modules) resolving this checkout.
   resolve: { alias: [{ find: /^@space\/icons$/, replacement: fileURLToPath(new URL("../../packages/icons/src/app-icons.tsx", import.meta.url)) }] },

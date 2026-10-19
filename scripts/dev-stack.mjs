@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { composeDefinition, ensureSecrets, initializeState, packageWorkspaces, privateFile, readPins, readState, runtimeDirectory, saveState, serviceEnvironment, statePath } from "./dev-stack-state.mjs";
+import { composeDefinition, ensureSecrets, initializeState, packageWorkspaces, privateDirectory, privateFile, privateFileStat, readPins, readState, runtimeDirectory, saveState, serviceEnvironment, statePath } from "./dev-stack-state.mjs";
 import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "./dev-stack-processes.mjs";
 
 export const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
@@ -88,24 +88,22 @@ export function prepareFiles(state) {
   }
   // tsx also opens IPC sockets under TMPDIR. A checkout-relative temporary
   // directory can truncate/collide on Linux as well as exceeding macOS limits.
-  mkdirSync(join(state.runtime, "tmp"), { recursive: true, mode: 0o700 });
-  for (const name of ["logs", "bin", "tools", "data/home", "data/memory", "data/workspaces", "data/artifacts", "data/projects", "data/dots", "data/live-voice-logs"]) mkdirSync(join(state.directory, name), { recursive: true, mode: 0o700 });
+  privateDirectory(state.runtime, "tmp");
+  for (const name of ["logs", "bin", "tools", "data/home", "data/memory", "data/workspaces", "data/artifacts", "data/projects", "data/dots", "data/live-voice-logs"]) privateDirectory(state.directory, name);
   for (const [name, legacy] of [["space_memory.md", "gemini_history.md"], ["space_memory_monthly.md", "gemini_history_monthly.md"], ["installation-guide.md", null]]) {
     const destination = join(state.directory, "data/memory", name);
     const previous = legacy && join(state.directory, "data/memory", legacy);
-    if (!existsSync(destination)) {
+    if (!privateFileStat(destination)) {
       // Upgrade only this stack's old private files; never overwrite edits or read an installed instance.
-      copyFileSync(previous && existsSync(previous) ? previous : join(root, "starter-memory", name), destination);
-      chmodSync(destination, 0o600);
-    }
+      privateFile(destination, readFileSync(previous && privateFileStat(previous) ? previous : join(root, "starter-memory", name)));
+    } else chmodSync(destination, 0o600);
   }
   /**
    * Quote one executable path as a literal POSIX shell argument, including embedded apostrophes.
    */
   const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
   const wrapper = join(state.directory, "bin/opencode-vscode-parity");
-  writeFileSync(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "scripts/dev-stack-opencode.mjs"))} ${quote(state.directory)} "$@"\n`, { mode: 0o700 });
-  chmodSync(wrapper, 0o700);
+  privateFile(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "scripts/dev-stack-opencode.mjs"))} ${quote(state.directory)} "$@"\n`, 0o700);
   privateFile(join(state.directory, "compose.json"), `${JSON.stringify(composeDefinition(state), null, 2)}\n`);
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -391,5 +391,144 @@ for (const legacy of [false, true]) {
     prepareFiles(state);
     for (const file of ["space_memory.md", "space_memory_monthly.md"]) assert.equal(readFileSync(join(memory, file), "utf8"), "subsequent user edit\n");
     if (legacy) assert.equal(readFileSync(join(memory, "gemini_history.md"), "utf8"), "existing private index\n");
+  });
+}
+
+for (const [target, kind] of [["data", "symlink"], ["bin/opencode-vscode-parity", "symlink"], ["data/memory/space_memory.md", "symlink"], ["data/memory/gemini_history.md", "symlink"], ["data/memory/space_memory.md", "hardlink"], ["data/memory/space_memory.md", "dangling"]]) {
+  test(`redteam: preparation refuses ${kind} ${target} without touching outside data`, (t) => {
+    const directory = fixture(t);
+    const state = initializeState(directory, statePath(directory, {}), {});
+    runtimeDirectory(state);
+    t.after(() => rmSync(state.runtime, { recursive: true, force: true }));
+    const outside = join(directory, "outside");
+    const path = join(state.directory, target);
+    mkdirSync(join(path, ".."), { recursive: true });
+    if (target === "data") mkdirSync(outside);
+    else if (kind !== "dangling") writeFileSync(outside, "private outside canary\n", { mode: 0o644 });
+    if (kind === "hardlink") linkSync(outside, path); else symlinkSync(outside, path);
+    assert.throws(() => prepareFiles(state), /private|symlink|directory/i);
+    if (target === "data") assert.deepEqual(readdirSync(outside), []);
+    else if (kind === "dangling") assert.equal(existsSync(outside), false);
+    else {
+      assert.equal(readFileSync(outside, "utf8"), "private outside canary\n");
+      assert.equal(statSync(outside).mode & 0o777, 0o644);
+    }
+  });
+}
+
+test("redteam: preparation refuses a symlinked runtime tmp directory", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  runtimeDirectory(state);
+  t.after(() => rmSync(state.runtime, { recursive: true, force: true }));
+  const outside = join(directory, "outside-tmp");
+  mkdirSync(outside, { mode: 0o755 });
+  symlinkSync(outside, join(state.runtime, "tmp"));
+  assert.throws(() => prepareFiles(state), /private directory/);
+  assert.deepEqual(readdirSync(outside), []);
+  assert.equal(statSync(outside).mode & 0o777, 0o755);
+});
+
+test("redteam: hard-linked secrets cannot change an outside file's permissions", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  ensureSecrets(state);
+  const path = join(state.directory, "secrets/postgres-password");
+  const outside = join(directory, "outside-secret");
+  writeFileSync(outside, "a".repeat(64), { mode: 0o644 });
+  rmSync(path);
+  linkSync(outside, path);
+  assert.throws(() => ensureSecrets(state), /private|secret file/i);
+  assert.equal(statSync(outside).mode & 0o777, 0o644);
+  assert.equal(readFileSync(outside, "utf8"), "a".repeat(64));
+});
+
+for (const kind of ["symlink", "hardlink"]) {
+  test(`redteam: supervision refuses a ${kind} log before launching a child`, async (t) => {
+    const directory = fixture(t);
+    const state = initializeState(directory, statePath(directory, {}), {});
+    mkdirSync(join(state.directory, "logs"));
+    const outside = join(directory, "outside-log");
+    writeFileSync(outside, "outside canary\n", { mode: 0o644 });
+    const path = join(state.directory, "logs/linked.log");
+    if (kind === "symlink") symlinkSync(outside, path); else linkSync(outside, path);
+    const runner = new ProcessSupervisor(state, {}, () => {});
+    try {
+      assert.throws(() => runner.start("linked", process.execPath, ["-e", "console.log('unwanted write'); setInterval(()=>{},1000)"], {}, false), /private|symlink|log/i);
+      assert.deepEqual(state.processes, []);
+    } finally { await runner.stop(); }
+    assert.equal(readFileSync(outside, "utf8"), "outside canary\n");
+    assert.equal(statSync(outside).mode & 0o777, 0o644);
+  });
+}
+
+test("redteam: supervision rejects a linked log directory", async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const outside = join(directory, "outside-logs");
+  mkdirSync(outside, { mode: 0o755 });
+  symlinkSync(outside, join(state.directory, "logs"));
+  const runner = new ProcessSupervisor(state, {}, () => {});
+  try {
+    assert.throws(() => runner.start("linked", process.execPath, ["-e", "console.log('unwanted write')"], {}, false), /private directory/);
+    assert.deepEqual(state.processes, []);
+  } finally { await runner.stop(); }
+  assert.deepEqual(readdirSync(outside), []);
+  assert.equal(statSync(outside).mode & 0o777, 0o755);
+});
+
+test("redteam: replacing a live log path cannot redirect its open descriptor", { timeout: 10_000 }, async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const outside = join(directory, "outside-log");
+  writeFileSync(outside, "outside canary\n");
+  const runner = new ProcessSupervisor(state, {}, () => {});
+  const path = join(state.directory, "logs/rotation.log");
+  const original = join(state.directory, "logs/rotated.log");
+  try {
+    runner.start("rotation", process.execPath, ["-e", "console.log('ready'); setInterval(()=>console.log('tick'),20)"], {}, false);
+    for (let i = 0; i < 100 && (!existsSync(path) || !readFileSync(path, "utf8").includes("ready")); i++) await delay(20);
+    assert.match(readFileSync(path, "utf8"), /ready/);
+    renameSync(path, original);
+    symlinkSync(outside, path);
+    const size = statSync(original).size;
+    for (let i = 0; i < 100 && statSync(original).size === size; i++) await delay(20);
+    assert.ok(statSync(original).size > size, "continue writing only to the authenticated descriptor");
+    assert.equal(readFileSync(outside, "utf8"), "outside canary\n");
+  } finally { await runner.stop(); }
+});
+
+test("redteam: long newline-free output progresses while split secrets stay redacted", { timeout: 10_000 }, async (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  mkdirSync(join(state.directory, "logs"));
+  const secret = "ab".repeat(32);
+  const runner = new ProcessSupervisor(state, { secret }, () => {});
+  const path = join(state.directory, "logs/long-line.log");
+  try {
+    runner.start("long-line", process.execPath, ["-e", `
+      process.stdout.write("x".repeat(65520) + ${JSON.stringify(secret.slice(0, 20))});
+      setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(20))} + "y".repeat(196608)), 50);
+      setInterval(() => {}, 1000);
+    `], {}, false);
+    for (let i = 0; i < 100 && (!existsSync(path) || statSync(path).size < 131072); i++) await delay(20);
+    assert.ok(existsSync(path) && statSync(path).size >= 131072, "must flush a long line while its producer is still running");
+  } finally { await runner.stop(); }
+  const logged = readFileSync(path, "utf8");
+  assert.equal(logged, "x".repeat(65520) + "[redacted]" + "y".repeat(196608));
+  assert.ok(!logged.includes(secret));
+});
+
+for (const isolated of [true, false]) {
+  test(`redteam: Vite ${isolated ? "excludes checkout dotenv in the isolated stack" : "preserves standalone dotenv behavior"}`, (t) => {
+    const directory = fixture(t);
+    writeFileSync(join(directory, ".env.local"), "VITE_STACK_REDTEAM_CANARY=outside-account-canary\n");
+    const output = childProcess.execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import { resolveConfig } from "vite";
+      const config = await resolveConfig({ root: ${JSON.stringify(directory)}, configFile: ${JSON.stringify(join(root, "apps/web/vite.config.ts"))}, logLevel: "silent" }, "serve");
+      console.log(JSON.stringify(config.env));
+    `], { cwd: root, env: { ...process.env, SPACE_INSTANCE: isolated ? "dev" : "standalone" }, encoding: "utf8", timeout: 20_000 });
+    const env = JSON.parse(output.trim());
+    assert.equal(env.VITE_STACK_REDTEAM_CANARY, isolated ? undefined : "outside-account-canary");
   });
 }

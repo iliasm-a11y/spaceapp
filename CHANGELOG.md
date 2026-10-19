@@ -9,7 +9,9 @@ Semantic Versioning.
   owner setup, OpenCode terminal UI, hot reload, supervised lifecycle commands
   and a disposable CI integration smoke check. Authenticate process groups again
   before shutdown escalation and keep plugin storage and OAuth configuration
-  isolated from an installed instance.
+  isolated from an installed instance. Refuse linked private state, bound partial
+  log lines without exposing generated secrets, and disable Vite dotenv loading
+  for the isolated stack.
 
 ## [1.1.6] - 2026-10-18
 
