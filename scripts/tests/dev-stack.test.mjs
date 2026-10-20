@@ -294,7 +294,7 @@ test("dev-stack reauthenticates a process group before escalating shutdown", asy
   assert.ok(identities.every(Boolean));
   const [managed, unrelated] = identities;
   const original = childProcess.execFileSync;
-  const before = original("ps", ["-axo", "pid=,ppid=,pgid=,lstart=,stat="], { encoding: "utf8" });
+  const before = processTable().map(({ pid, ppid, pgid, start, stat }) => `${pid} ${ppid} ${pgid} ${start} ${stat}`).join("\n");
   // Model the owned group disappearing after TERM, followed by reuse of its
   // numeric ID. No kernel PID recycling or real signal delivery is claimed.
   const after = before.split("\n").filter((line) => Number(line.trim().split(/\s+/)[0]) !== managed.pid).map((line) => {
