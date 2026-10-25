@@ -10,6 +10,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { getAuthConfig } from "../src/auth.js";
 
 describe("disabled Google auth in the contributor stack", () => {
+  it.each(["development", "production", undefined])("preserves upstream HTTPS cookie policy with OAuth isolation (%s)", (nodeEnv) => {
+    const config = getAuthConfig({ NODE_ENV: nodeEnv, SPACE_GOOGLE_AUTH_DISABLED: "true" });
+    expect(config.secureCookies).toBe(nodeEnv === "production" ? true : "auto");
+    expect(config.googleAuthDisabled).toBe(true);
+  });
+
   it("does not read installed OAuth credentials", () => {
     vi.mocked(existsSync).mockClear();
     vi.mocked(readFileSync).mockClear();

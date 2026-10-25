@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { join, resolve, dirname, basename, relative, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 
-export const defaultPorts = { api: 5910, web: 5911, postgres: 55432, temporal: 57233 };
+export const defaultPorts = { api: 5910, web: 5911, postgres: 55432, temporal: 57233, opencode: 54096 };
 export const packageWorkspaces = ["contracts", "icons", "streaming", "opencode-control", "memory-graph", "browser-host", "cli-host", "codex-app-server", "runtime", "db", "gateway"];
 
 /**
@@ -20,24 +20,29 @@ export function readPins(root) {
     if (matches.length !== 1 || !/@sha256:[a-f0-9]{64}$/.test(matches[0])) throw new Error(`Expected one digest-pinned ${name} image in the launcher template.`);
     return matches[0];
   };
-  const version = readFileSync(join(root, "Dockerfile"), "utf8").match(/\bopencode-ai@(\d+\.\d+\.\d+)(?=[\s\\])/);
-  if (!version) throw new Error("Dockerfile must pin an exact opencode-ai version.");
-  return { postgres: image("pgvector/pgvector"), temporal: image("temporalio/auto-setup"), opencode: version[1] };
+  // Ignore Dockerfile comments, but never silently choose between different package/version pins.
+  const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8").split("\n")
+    .filter((line) => !/^\s*#/.test(line)).map((line) => line.replace(/\s+#.*$/, "")).join("\n");
+  const matches = [...dockerfile.matchAll(/(?:^|[\s"'])(@opencode\/cli|opencode-ai)@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=[\s\\"']|$)/gm)];
+  const pins = new Map(matches.map((match) => [`${match[1]}@${match[2]}`, match]));
+  if (pins.size !== 1) throw new Error("Dockerfile must pin exactly one OpenCode package and version (@opencode/cli or opencode-ai).");
+  const [, opencodePackage, opencode] = pins.values().next().value;
+  return { postgres: image("pgvector/pgvector"), temporal: image("temporalio/auto-setup"), opencodePackage, opencode };
 }
 
 /**
- * Validate four distinct unprivileged ports while reserving the installed product's ports.
- * @returns {{api: number, web: number, postgres: number, temporal: number}} Validated loopback bindings.
+ * Validate distinct unprivileged ports while reserving the installed product's ports.
+ * @returns {{api: number, web: number, postgres: number, temporal: number, opencode?: number}} Validated loopback bindings; legacy recovery omits OpenCode.
  */
-export function resolvePorts(env = process.env) {
-  const ports = Object.fromEntries(Object.entries(defaultPorts).map(([name, fallback]) => {
+export function resolvePorts(env = process.env, { legacy = false } = {}) {
+  const ports = Object.fromEntries(Object.entries(defaultPorts).filter(([name]) => !legacy || name !== "opencode").map(([name, fallback]) => {
     const key = `SPACE_DEV_${name.toUpperCase()}_PORT`;
     const raw = env[key] ?? String(fallback);
     const value = Number(raw);
     if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value < 1024 || value > 65535 || [4910, 4911].includes(value)) throw new Error(`${key} must be a port between 1024 and 65535, excluding installed ports 4910/4911.`);
     return [name, value];
   }));
-  if (new Set(Object.values(ports)).size !== 4) throw new Error("Dev stack ports must be distinct.");
+  if (new Set(Object.values(ports)).size !== Object.keys(ports).length) throw new Error("Dev stack ports must be distinct.");
   return ports;
 }
 
@@ -108,7 +113,7 @@ export function readState(root, directory) {
   const state = JSON.parse(readFileSync(path, "utf8"));
   const project = `spaceapp-dev-${createHash("sha256").update(directory).digest("hex").slice(0, 12)}`;
   if (state.version !== 1 || state.root !== root || state.directory !== directory || state.project !== project || !/^[a-f0-9]{32}$/.test(state.id)) throw new Error("State manifest does not belong to this checkout; refusing to adopt or remove it.");
-  resolvePorts(Object.fromEntries(Object.entries(state.ports).map(([key, value]) => [`SPACE_DEV_${key.toUpperCase()}_PORT`, String(value)])));
+  resolvePorts(Object.fromEntries(Object.entries(state.ports).map(([key, value]) => [`SPACE_DEV_${key.toUpperCase()}_PORT`, String(value)])), { legacy: !Object.hasOwn(state.ports, "opencode") });
   return state;
 }
 
@@ -122,8 +127,10 @@ export function initializeState(root, directory, env = process.env) {
     privateDirectory(directory);
     for (const name of Object.keys(defaultPorts)) {
       const key = `SPACE_DEV_${name.toUpperCase()}_PORT`;
-      if (env[key] !== undefined && Number(env[key]) !== saved.ports[name]) throw new Error(`${key} differs from saved state; reset this stack before changing ports.`);
+      if (saved.ports[name] !== undefined && env[key] !== undefined && Number(env[key]) !== saved.ports[name]) throw new Error(`${key} differs from saved state; reset this stack before changing ports.`);
     }
+    // Old manifests have four ports. Add the OpenCode port without changing existing bindings or secrets.
+    saved.ports = resolvePorts({ ...env, ...Object.fromEntries(Object.entries(saved.ports).map(([key, value]) => [`SPACE_DEV_${key.toUpperCase()}_PORT`, String(value)])) });
     return saved;
   }
   if (existsSync(directory) && readdirSync(directory).length) throw new Error("State directory is not empty and has no ownership manifest; refusing to adopt it.");
@@ -188,12 +195,13 @@ export function ensureSecrets(state) {
   const password = secret("postgres-password");
   const session = secret("session-secret");
   const setup = secret("setup-token");
+  const opencode = secret("opencode-password");
   const database = `postgresql://spaceapp:${password}@127.0.0.1:${state.ports.postgres}/spaceapp_dev`;
   privateFile(join(directory, "database-url"), `${database}\n`);
   // Temporal runs as an unprivileged container user. Compose injects this private
   // env file, avoiding unreadable 0600 bind mounts or world-readable passwords.
   privateFile(join(directory, "temporal.env"), `POSTGRES_PWD=${password}\n`);
-  return { password, session, setup, database };
+  return { password, session, setup, database, opencode };
 }
 
 /**

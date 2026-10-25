@@ -62,8 +62,12 @@ jobs:
         run: npm run pack:dry-run -w run-spaceapp
 
   dev-stack:
-    name: Contributor stack from a fresh checkout
-    runs-on: ubuntu-latest
+    name: Contributor stack (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
@@ -79,10 +83,11 @@ jobs:
         run: npm ci
       - name: Lifecycle and isolation regression tests
         run: npm run test:dev-stack
-      - name: Non-TTY owner, OpenCode, reload, supervision and cleanup proof
+      - name: Non-TTY owner, concurrent OpenCode panes, reload and cleanup proof
+        if: runner.os == 'Linux'
         run: npm run smoke:dev-stack
       - name: Retry owned fixture cleanup after an interrupted test
-        if: always()
+        if: always() && runner.os == 'Linux'
         shell: bash
         run: |
           for state in .dev-stack-smoke-*; do

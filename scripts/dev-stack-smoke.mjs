@@ -17,7 +17,7 @@ const label = `smoke-${process.pid}-${randomBytes(4).toString("hex")}`;
 const directory = join(root, `.dev-stack-${label}`);
 const env = { ...process.env, SPACE_DEV_STATE_DIR: directory, PATH: `${dirname(process.execPath)}:${process.env.PATH}` };
 const ports = new Set();
-for (const name of ["API", "WEB", "POSTGRES", "TEMPORAL"]) {
+for (const name of ["API", "WEB", "POSTGRES", "TEMPORAL", "OPENCODE"]) {
   let port;
   do { port = await new Promise((resolve, reject) => { const server = net.createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close(() => resolve(value)); }); }); }
   while (ports.has(port) || [4910, 4911].includes(port));
@@ -25,7 +25,8 @@ for (const name of ["API", "WEB", "POSTGRES", "TEMPORAL"]) {
   env[`SPACE_DEV_${name}_PORT`] = String(port);
 }
 const origin = `http://127.0.0.1:${env.SPACE_DEV_WEB_PORT}`;
-let output = "", exitCode = null, state, cookie = "", csrf = {}, ws;
+let output = "", exitCode = null, state, cookie = "", csrf = {};
+const sockets = new Set();
 const child = spawn("npm", ["run", "dev:stack"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
 child.once("error", (error) => { console.error(error.message); exitCode = 1; });
 child.once("exit", (code) => { exitCode = code ?? 1; });
@@ -78,6 +79,32 @@ async function waitReady() {
  */
 async function command(name) { return execute("npm", ["run", "dev:stack", "--", name], { cwd: root, env, timeout: 900_000 }); }
 
+/** Open and observe an actual PTY through the authenticated WebSocket proxy, without model inference. */
+async function verifyTerminal(pane) {
+  const session = await (await http(`/api/panes/${pane.id}/cli/session`, "POST", { runtimeId: "cli:opencode" })).json();
+  assert.ok(session.websocket?.token);
+  let terminal = "", attached = false;
+  const url = new URL(`${origin.replace("http:", "ws:")}/api/panes/${pane.id}/cli/terminal`);
+  url.search = new URLSearchParams({ token: session.websocket.token, sessionId: session.session.sessionId, initialCols: "120", initialRows: "30" }).toString();
+  const ws = new WebSocket(url, { headers: { Cookie: cookie, Origin: origin } });
+  sockets.add(ws);
+  let socketError;
+  ws.on("error", (error) => { socketError = error; });
+  ws.on("message", (data) => {
+    const message = JSON.parse(data.toString());
+    if (message.type === "ready") attached = true;
+    if (message.type === "output") terminal += message.data;
+    if (message.type === "error") socketError = new Error(message.message);
+  });
+  await until(async () => {
+    if (socketError) throw socketError;
+    const current = await (await http(`/api/panes/${pane.id}/cli/session`)).json();
+    assert.ok(!["EXITED", "ERROR"].includes(current.session.status), "OpenCode must remain alive");
+    return attached && ["RUNNING", "IDLE"].includes(current.session.status) && /opencode|Ask anything|Connect provider|switch agent|ctrl\+/i.test(terminal);
+  }, "OpenCode terminal UI through the Vite WebSocket proxy", 90_000);
+  return { ws, bytes: terminal.length, digest: createHash("sha256").update(terminal).digest("hex") };
+}
+
 const originalFiles = new Map();
 /**
  * Restore every source snapshot synchronously, including during signal handling.
@@ -119,29 +146,21 @@ try {
   const panes = await (await http(`/api/panes?roomId=${encodeURIComponent(starter.room.id)}`)).json();
   const pane = panes.data.find((entry) => entry.mode === "TERMINAL" && entry.terminalRuntimeId === "cli:opencode");
   assert.ok(pane, "Getting Started room has its OpenCode pane");
-  const session = await (await http(`/api/panes/${pane.id}/cli/session`, "POST", { runtimeId: "cli:opencode" })).json();
-  assert.ok(session.websocket?.token);
-  let terminal = "", attached = false;
-  const url = new URL(`${origin.replace("http:", "ws:")}/api/panes/${pane.id}/cli/terminal`);
-  url.search = new URLSearchParams({ token: session.websocket.token, sessionId: session.session.sessionId, initialCols: "120", initialRows: "30" }).toString();
-  ws = new WebSocket(url, { headers: { Cookie: cookie, Origin: origin } });
-  let socketError;
-  ws.on("error", (error) => { socketError = error; });
-  ws.on("message", (data) => {
-    const message = JSON.parse(data.toString());
-    if (message.type === "ready") attached = true;
-    if (message.type === "output") terminal += message.data;
-    if (message.type === "error") socketError = new Error(message.message);
-  });
-  await until(async () => {
-    if (socketError) throw socketError;
-    const current = await (await http(`/api/panes/${pane.id}/cli/session`)).json();
-    assert.ok(!["EXITED", "ERROR"].includes(current.session.status), "OpenCode must remain alive");
-    return attached && ["RUNNING", "IDLE"].includes(current.session.status) && /opencode|Ask anything|Connect provider|switch agent|ctrl\+/i.test(terminal);
-  }, "OpenCode terminal UI through the Vite WebSocket proxy", 90_000);
-  check(`OpenCode PTY UI is running, received ${terminal.length} terminal bytes (sha256 ${createHash("sha256").update(terminal).digest("hex")})`);
-  ws.close();
-  ws = null;
+  const other = await (await http("/api/panes", "POST", { roomId: starter.room.id, title: "Concurrent OpenCode proof", mode: "TERMINAL", terminalRuntimeId: "cli:opencode" })).json();
+  const terminals = await Promise.all([verifyTerminal(pane), verifyTerminal(other)]);
+  for (const [index, terminal] of terminals.entries()) check(`OpenCode PTY ${index + 1} is running, received ${terminal.bytes} terminal bytes (sha256 ${terminal.digest})`);
+  for (const candidate of [pane, other]) {
+    const current = await (await http(`/api/panes/${candidate.id}/cli/session`)).json();
+    assert.ok(["RUNNING", "IDLE"].includes(current.session.status), "both OpenCode panes must remain alive together");
+  }
+  const active = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
+  if (active.pins.opencodePackage === "@opencode/cli") {
+    const servers = active.processes.filter((record) => record.name === "opencode-server");
+    assert.equal(servers.length, 1, "two panes must share one supervised server");
+    assert.ok(isSameProcess(servers[0]));
+  }
+  check("two concurrent OpenCode panes are live without competing provider-store servers");
+  for (const terminal of terminals) terminal.ws.close();
 
   // Restore on normal/error completion and catchable termination signals.
   const apiFile = join(root, "apps/api/src/server.ts");
@@ -175,13 +194,13 @@ try {
 } catch (error) {
   // Keep CI failures diagnosable before the disposable fixture is reset.
   // The supervisor already redacts generated secrets from these child logs.
-  for (const service of ["api", "worker", "cli-host", "web"]) {
+  for (const service of ["api", "worker", "cli-host", "web", "opencode-server"]) {
     const path = join(directory, "logs", `${service}.log`);
     if (existsSync(path)) console.error(`[smoke:dev-stack] ${service} log tail:\n${readFileSync(path, "utf8").split("\n").slice(-30).join("\n").replace(/([?&](?:token|ticket)=)[^&\s]+/gi, "$1[redacted]")}`);
   }
   throw error;
 } finally {
-  if (ws) ws.terminate();
+  for (const socket of sockets) socket.terminate();
   restoreSources();
   if (existsSync(join(directory, "manifest.json"))) {
     state = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));

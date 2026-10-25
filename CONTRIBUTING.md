@@ -65,12 +65,19 @@ npm run dev:stack
 
 On a fresh checkout the command downloads the digest-pinned dependency images,
 builds the internal packages and worker, installs the Dockerfile-pinned
-`opencode-ai` locally, applies migrations, and waits for both API and Vite
+OpenCode package locally (`@opencode/cli` on current main, or `opencode-ai` on older checkouts), applies migrations, and waits for both API and Vite
 readiness. The first start can take several minutes. It prints the browser URL
 and one-time owner setup token. Open that URL, create the owner using the token,
 sign in and open the **Getting Started** room's OpenCode pane. The token has the
 normal 15-minute setup lifetime after API startup; it cannot claim a second
 owner. Subsequent starts retain your account and data.
+
+OpenCode 2 panes share one authenticated loopback server managed by the same
+supervisor. No per-user OpenCode background daemon is started. Its password
+stays in the private state directory; `down`, `reset`, worker failure and terminal
+hangup stop the server with the rest of the stack. Rebuild also restarts it, so
+reopen terminal panes afterwards. A previous four-port state keeps its data and
+existing bindings; its OpenCode port is added on the next start.
 
 The supervisor stays in the foreground, also without a TTY. Service logs are in
 `.dev-stack/logs/`; unexpected process exits name the failed service, stop the
@@ -107,6 +114,7 @@ keeps the ownership manifest and secrets so it can be retried.
 | API | 5910 | `SPACE_DEV_API_PORT` |
 | PostgreSQL | 55432 | `SPACE_DEV_POSTGRES_PORT` |
 | Temporal gRPC | 57233 | `SPACE_DEV_TEMPORAL_PORT` |
+| OpenCode 2 server | 54096 | `SPACE_DEV_OPENCODE_PORT` |
 
 Every published port binds to `127.0.0.1`. Values must be distinct, unprivileged
 ports, excluding installed ports 4910/4911. Ports are saved and reused by later
@@ -250,3 +258,16 @@ attachment, room retention, control, readiness, polling or deployment.
 Keep changes reviewable and include the exact commands and limitations of your
 verification. Never include credentials, private transcripts or local runtime
 state in a contribution.
+
+## License of contributions
+
+SpaceApp is licensed under the [MIT License](LICENSE). Contributions are
+accepted under the same license (inbound = outbound): by submitting a
+contribution you license it to everyone under the MIT License. You keep the
+copyright of your contribution.
+
+Every commit must carry a `Signed-off-by:` line with your real name and email,
+which certifies the [Developer Certificate of Origin 1.1](https://developercertificate.org/):
+that you wrote the contribution or have the right to submit it under the MIT
+License. `git commit -s` adds the line. There is no separate contributor
+license agreement.

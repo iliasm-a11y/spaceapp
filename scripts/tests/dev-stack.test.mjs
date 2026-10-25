@@ -3,14 +3,15 @@ import childProcess from "node:child_process";
 import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { composeDefinition, ensureSecrets, initializeState, readPins, readState, resolvePorts, runtimeDirectory, saveState, serviceEnvironment, statePath } from "../dev-stack-state.mjs";
+import { composeDefinition, defaultPorts, ensureSecrets, initializeState, readPins, readState, resolvePorts, runtimeDirectory, saveState, serviceEnvironment, statePath } from "../dev-stack-state.mjs";
 import { isSameProcess, processIdentity, processTable, ProcessSupervisor, stopRecords } from "../dev-stack-processes.mjs";
 import { prepareFiles, readyResponse, reset, root } from "../dev-stack.mjs";
+import { openCodeArguments, openCodeEnvironment } from "../dev-stack-opencode.mjs";
 
 /**
  * Create a disposable checkout skeleton with the real dependency pins and remove it after the test.
@@ -59,7 +60,7 @@ test("dev-stack process snapshots retain stable birth dates and zombie detection
 });
 
 test("dev-stack validates ports strictly, forbids installed ports and rejects duplicate bindings", () => {
-  assert.deepEqual(resolvePorts({}), { api: 5910, web: 5911, postgres: 55432, temporal: 57233 });
+  assert.deepEqual(resolvePorts({}), { api: 5910, web: 5911, postgres: 55432, temporal: 57233, opencode: 54096 });
   assert.equal(resolvePorts({ SPACE_DEV_API_PORT: "6010" }).api, 6010);
   for (const value of ["0", "65536", "5432abc", "1e4", "4910", "4911", "-1", ""]) assert.throws(() => resolvePorts({ SPACE_DEV_API_PORT: value }));
   assert.throws(() => resolvePorts({ SPACE_DEV_API_PORT: "5911" }), /distinct/);
@@ -94,7 +95,7 @@ test("dev-stack retains per-state secrets with mode 0600 and injects Temporal cr
   const first = ensureSecrets(state);
   assert.deepEqual(ensureSecrets(state), first);
   assert.equal(statSync(state.directory).mode & 0o777, 0o700);
-  for (const name of ["postgres-password", "session-secret", "setup-token", "database-url", "temporal.env"]) assert.equal(statSync(join(state.directory, "secrets", name)).mode & 0o777, 0o600);
+  for (const name of ["postgres-password", "session-secret", "setup-token", "database-url", "temporal.env", "opencode-password"]) assert.equal(statSync(join(state.directory, "secrets", name)).mode & 0o777, 0o600);
   const compose = composeDefinition(state);
   assert.ok(!JSON.stringify(compose).includes(first.password));
   assert.deepEqual(compose.services.temporal.env_file, ["./secrets/temporal.env"]);
@@ -405,7 +406,7 @@ test("dev-stack foreground supervisor drains real detached children on SIGHUP", 
   const stateDirectory = join(root, `.dev-stack-signal-${basename(directory)}`);
   const env = { ...process.env };
   const ports = new Set();
-  for (const name of ["API", "WEB", "POSTGRES", "TEMPORAL"]) {
+  for (const name of Object.keys(defaultPorts).map((name) => name.toUpperCase())) {
     let port;
     do {
       port = await new Promise((resolve, reject) => {
@@ -418,7 +419,7 @@ test("dev-stack foreground supervisor drains real detached children on SIGHUP", 
     env[`SPACE_DEV_${name}_PORT`] = String(port);
   }
   // Execute the actual up/shutdown/finally path and a real private control
-  // socket. Stub only Docker, build commands and HTTP readiness; launch four
+  // socket. Stub only Docker, build commands and HTTP readiness; launch five
   // real detached Node children instead of a second complete application.
   const child = childProcess.spawn(process.execPath, ["-e", `
     const cp = require("node:child_process");
@@ -453,7 +454,8 @@ test("dev-stack foreground supervisor drains real detached children on SIGHUP", 
     const [message] = await once(child, "message", { signal: AbortSignal.timeout(10_000) });
     assert.equal(message.ready, true, stderr);
     records = message.processes;
-    assert.equal(records.length, 4);
+    assert.equal(records.length, 5);
+    assert.ok(records.some(record => record.name === "opencode-server"));
     assert.ok(records.every(record => isSameProcess(record)));
     child.kill("SIGHUP");
     const [code, signal] = await exited;
@@ -560,7 +562,7 @@ test("redteam: the OpenCode wrapper refuses a linked provider home before creati
   mkdirSync(outside, { mode: 0o755 });
   mkdirSync(join(state.directory, "data"));
   symlinkSync(outside, join(state.directory, "data/providers"));
-  const result = childProcess.spawnSync(process.execPath, [join(root, "scripts/dev-stack-opencode.mjs"), state.directory, "inspect-env"], { encoding: "utf8", timeout: 5000 });
+  const result = childProcess.spawnSync(process.execPath, [join(root, "scripts/dev-stack-opencode.mjs"), state.directory, state.pins.opencodePackage, String(state.ports.opencode), "inspect-env"], { encoding: "utf8", timeout: 5000 });
   assert.notEqual(result.status, 0, "refuse unsafe provider state even for a diagnostic command");
   assert.match(result.stderr, /private directory/);
   assert.deepEqual(readdirSync(outside), []);
@@ -671,3 +673,87 @@ for (const isolated of [true, false]) {
     assert.equal(env.VITE_STACK_REDTEAM_CANARY, isolated ? undefined : "outside-account-canary");
   });
 }
+
+for (const [packageName, version] of [["opencode-ai", "1.18.4"], ["@opencode/cli", "2.0.32"]]) {
+  test(`dev-stack reads the exact ${packageName} pin and ignores commented alternatives`, (t) => {
+    const directory = fixture(t);
+    writeFileSync(join(directory, "Dockerfile"), `# npm install opencode-ai@0.0.1\nRUN npm install --global "${packageName}@${version}" # opencode-ai@0.0.2\n`);
+    assert.deepEqual({ packageName: readPins(directory).opencodePackage, version: readPins(directory).opencode }, { packageName, version });
+  });
+}
+
+for (const invalid of ["@opencode/cli@latest", "@opencode/cli@^2.0.32", "@opencode/cli@2.0", "opencode-ai@1.18.4 @opencode/cli@2.0.32", "@opencode/cli@2.0.32 @opencode/cli@2.0.33"]) {
+  test(`dev-stack rejects an absent, floating or ambiguous OpenCode pin: ${invalid}`, (t) => {
+    const directory = fixture(t);
+    writeFileSync(join(directory, "Dockerfile"), `RUN npm install --global ${invalid}\n`);
+    assert.throws(() => readPins(directory), /exactly one OpenCode/);
+  });
+}
+
+test("dev-stack upgrades four-port state without replacing its identity, ports or secrets", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const secrets = ensureSecrets(state);
+  delete state.ports.opencode;
+  saveState(state);
+  const restored = initializeState(directory, state.directory, { SPACE_DEV_OPENCODE_PORT: "54097" });
+  assert.equal(restored.id, state.id);
+  assert.deepEqual(restored.ports, { ...state.ports, opencode: 54097 });
+  assert.deepEqual(ensureSecrets(restored), secrets);
+  assert.throws(() => initializeState(directory, state.directory, { SPACE_DEV_OPENCODE_PORT: String(state.ports.api) }), /distinct/);
+});
+
+test("dev-stack gives the OpenCode server and clients the same private home without external credentials", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const secret = ensureSecrets(state).opencode;
+  const env = openCodeEnvironment(state.directory, { PATH: process.env.PATH, HOME: "/outside", XDG_CONFIG_HOME: "/outside", OPENAI_API_KEY: "not-forwarded", NODE_OPTIONS: "--require=outside", OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: secret });
+  assert.equal(env.HOME, join(state.directory, "data/providers/opencode"));
+  assert.equal(env.XDG_CONFIG_HOME, join(env.HOME, "config"));
+  assert.equal(env.OPENCODE_SERVER_PASSWORD, secret);
+  assert.equal(env.OPENCODE_DISABLE_AUTOUPDATE, "true");
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.NODE_OPTIONS, undefined);
+  for (const key of ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) assert.equal(statSync(env[key]).mode & 0o777, 0o700);
+});
+
+test("dev-stack attaches fresh and resumed OpenCode 2 panes without a per-user daemon", () => {
+  const cwd = "/workspace with spaces";
+  assert.deepEqual(openCodeArguments("@opencode/cli", [], 54096, cwd), ["--server", "http://127.0.0.1:54096", cwd]);
+  assert.deepEqual(openCodeArguments("@opencode/cli", ["--continue"], 54096, cwd), ["--server", "http://127.0.0.1:54096", "--continue", cwd]);
+  assert.deepEqual(openCodeArguments("@opencode/cli", ["models"], 54096, cwd), ["models", "--standalone"]);
+  assert.deepEqual(openCodeArguments("@opencode/cli", ["--version"], undefined, cwd), ["--version"]);
+  assert.deepEqual(openCodeArguments("opencode-ai", ["--continue"], undefined, cwd), ["--continue"]);
+  for (const port of [undefined, 0, 65536, "12abc", "54096/path"]) assert.throws(() => openCodeArguments("@opencode/cli", [], port, cwd), /loopback port/);
+  for (const args of [["serve"], ["--server", "http://outside"], ["models", "--server=http://outside"]]) assert.throws(() => openCodeArguments("@opencode/cli", args, 54096, cwd), /supervised/);
+});
+
+test("dev-stack wrapper reads generated server credentials even with the CLI host's minimal environment", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), {});
+  const secrets = ensureSecrets(state);
+  const bin = join(state.directory, "tools/node_modules/.bin");
+  mkdirSync(bin, { recursive: true });
+  const tool = join(bin, "opencode");
+  writeFileSync(tool, `#!${process.execPath}\nconsole.log(JSON.stringify({args:process.argv.slice(2), home:process.env.HOME, authenticated:process.env.OPENCODE_SERVER_PASSWORD===${JSON.stringify(secrets.opencode)}, unexpected:process.env.OPENAI_API_KEY}));\n`, { mode: 0o700 });
+  const result = childProcess.spawnSync(process.execPath, [join(root, "scripts/dev-stack-opencode.mjs"), state.directory, "@opencode/cli", String(state.ports.opencode)], { cwd: directory, env: { PATH: process.env.PATH, HOME: "/outside", OPENAI_API_KEY: "not-forwarded" }, encoding: "utf8", timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.authenticated, true);
+  assert.equal(output.unexpected, undefined);
+  assert.equal(output.home, join(state.directory, "data/providers/opencode"));
+  assert.deepEqual(output.args, ["--server", "http://127.0.0.1:54096", realpathSync(directory)]);
+  assert.ok(!result.stdout.includes(secrets.opencode));
+});
+
+test("dev-stack can still read and recover old state when its API uses the new OpenCode default port", (t) => {
+  const directory = fixture(t);
+  const state = initializeState(directory, statePath(directory, {}), { SPACE_DEV_API_PORT: "54096", SPACE_DEV_OPENCODE_PORT: "54097" });
+  delete state.ports.opencode;
+  saveState(state);
+  assert.equal(readState(directory, state.directory).ports.api, 54096);
+  assert.throws(() => initializeState(directory, state.directory, {}), /distinct/);
+  const upgraded = initializeState(directory, state.directory, { SPACE_DEV_OPENCODE_PORT: "54097" });
+  assert.equal(upgraded.ports.api, 54096);
+  assert.equal(upgraded.ports.opencode, 54097);
+});

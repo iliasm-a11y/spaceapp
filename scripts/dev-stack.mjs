@@ -8,10 +8,11 @@ import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { composeDefinition, ensureSecrets, initializeState, packageWorkspaces, privateDirectory, privateFile, privateFileStat, readPins, readState, runtimeDirectory, saveState, serviceEnvironment, statePath } from "./dev-stack-state.mjs";
 import { isSameProcess, processIdentity, ProcessSupervisor, stopRecords } from "./dev-stack-processes.mjs";
+import { openCodeEnvironment } from "./dev-stack-opencode.mjs";
 
 export const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
 const execute = promisify(execFile);
-const services = ["cli-host", "worker", "api", "web"];
+const services = ["cli-host", "worker", "api", "web", "opencode-server"];
 /**
  * Prefix foreground lifecycle messages so readiness and failures are identifiable in CI transcripts.
  */
@@ -103,7 +104,7 @@ export function prepareFiles(state) {
    */
   const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
   const wrapper = join(state.directory, "bin/opencode-vscode-parity");
-  privateFile(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "scripts/dev-stack-opencode.mjs"))} ${quote(state.directory)} "$@"\n`, 0o700);
+  privateFile(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "scripts/dev-stack-opencode.mjs"))} ${quote(state.directory)} ${quote(state.pins.opencodePackage)} ${quote(String(state.ports.opencode))} "$@"\n`, 0o700);
   privateFile(join(state.directory, "compose.json"), `${JSON.stringify(composeDefinition(state), null, 2)}\n`);
 }
 
@@ -251,6 +252,26 @@ export async function up(directory) {
      * Start CLI host, worker, API watch and Vite, then wait for both direct and proxied readiness.
      */
     const launch = async () => {
+      if (state.pins.opencodePackage === "@opencode/cli") {
+        // Keep the shared OpenCode 2 server in our process tree: no per-user background daemon,
+        // no competing standalone servers on the same provider store, and no model probes.
+        supervisor.start("opencode-server", join(directory, "tools/node_modules/.bin/opencode"),
+          ["serve", "--hostname", "127.0.0.1", "--port", String(state.ports.opencode)],
+          { env: openCodeEnvironment(directory, { ...env, OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: secrets.opencode }), cwd: join(directory, "data/providers/opencode") });
+        const deadline = Date.now() + 60_000;
+        for (;;) {
+          if (stopping) throw new Error("Startup interrupted.");
+          try {
+            const response = await fetch(`http://127.0.0.1:${state.ports.opencode}/api/info`, {
+              headers: { authorization: `Basic ${Buffer.from(`opencode:${secrets.opencode}`).toString("base64")}` },
+              signal: AbortSignal.timeout(2000)
+            });
+            if (response.ok) break;
+          } catch { /* Retry a server that has not bound its loopback socket yet. */ }
+          if (Date.now() >= deadline) throw new Error("OpenCode server did not become ready; see logs/opencode-server.log.");
+          await delay(250);
+        }
+      }
       supervisor.start("cli-host", process.execPath, ["packages/cli-host/dist/main.js"], { env });
       supervisor.start("worker", process.execPath, ["apps/worker/dist/worker.js"], { env });
       // tsx watch stays alive after a failed recompile. /readyz monitoring below
@@ -304,10 +325,13 @@ export async function up(directory) {
     log(`Starting digest-pinned PostgreSQL and Temporal (project ${state.project})...`);
     await supervisor.run("docker-up", "docker", composeArgs(state, ["up", "-d", "--wait", "--wait-timeout", "180"]));
     await build();
-    const installed = join(directory, "tools/node_modules/opencode-ai/package.json");
-    if (!existsSync(installed) || JSON.parse(readFileSync(installed, "utf8")).version !== state.pins.opencode) {
-      log(`Installing opencode-ai@${state.pins.opencode} inside the state directory...`);
-      await runNpm("install-opencode", ["install", "--prefix", join(directory, "tools"), "--no-audit", "--no-fund", "--package-lock=false", "--save-exact", `opencode-ai@${state.pins.opencode}`]);
+    const spec = `${state.pins.opencodePackage}@${state.pins.opencode}`;
+    const installed = join(directory, "tools/node_modules", state.pins.opencodePackage, "package.json");
+    if (!existsSync(installed) || JSON.parse(readFileSync(installed, "utf8")).version !== state.pins.opencode || !existsSync(join(directory, "tools/node_modules/.bin/opencode"))) {
+      log(`Installing ${spec} inside the state directory...`);
+      // Replace the generated manifest so changing package names removes the legacy dependency too.
+      privateFile(join(directory, "tools/package.json"), `${JSON.stringify({ name: "spaceapp-dev-stack-opencode", private: true, dependencies: { [state.pins.opencodePackage]: state.pins.opencode } }, null, 2)}\n`);
+      await runNpm("install-opencode", ["install", "--prefix", join(directory, "tools"), "--no-audit", "--no-fund", "--package-lock=false"]);
     }
     log("Applying database migrations...");
     await supervisor.run("migrations", process.execPath, ["packages/db/dist/migrate.js"], { env });
