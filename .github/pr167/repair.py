@@ -10,7 +10,7 @@ import sys
 
 HEAD = '91395b1f4de1712c8790957234305697ad607ef3'
 UPSTREAM = '50272acbe54c4d82bd3174d712456f6bf3af2e53'
-TREE = '4d095965a808b8567a182d69150979ff15a9f519'
+TREE = '4a6248b99690d9d291330f3dacad0c291cf433bf'
 PATCH_SHA256 = '79a69e5ae1dd797c27f6d3fcde2fdd09530e3b459b63e5083198f55fa2749901'
 
 def git(*args, **kwargs):
@@ -61,6 +61,27 @@ def main():
         git('add', filename)
     git('apply', '--index', '--check', '-', input=patch)
     git('apply', '--index', '-', input=patch)
+    # Normalize the macOS cwd alias while still checking the complete client argument list.
+    path = pathlib.Path('scripts/tests/dev-stack.test.mjs')
+    text = path.read_text()
+    text = text.replace('readFileSync, readdirSync, renameSync', 'readFileSync, realpathSync, readdirSync, renameSync')
+    text = text.replace('assert.deepEqual(output.args, ["--server", "http://127.0.0.1:54096", directory]);', 'assert.deepEqual(output.args, ["--server", "http://127.0.0.1:54096", realpathSync(directory)]);')
+    path.write_text(text)
+    # Reproduced on unmodified upstream: the fixture still expected 6.28.1, Dockerfile ships 6.29.1.
+    path = pathlib.Path('scripts/tests/public-docker-distribution.test.mjs')
+    text = path.read_text()
+    if text.count(r'6\.28\.1') != 2:
+        raise SystemExit('Unexpected upstream Undici fixture')
+    path.write_text(text.replace(r'6\.28\.1', r'6\.29\.1'))
+    path = pathlib.Path('scripts/dev-stack-state.mjs')
+    path.write_text(path.read_text().replace('@returns {{api: number, web: number, postgres: number, temporal: number}} Validated loopback bindings.', '@returns {{api: number, web: number, postgres: number, temporal: number, opencode?: number}} Validated loopback bindings; legacy recovery omits OpenCode.'))
+    path = pathlib.Path('.github/workflows/ci.yml')
+    text = path.read_text()
+    text = text.replace('  dev-stack:\n    name: Contributor stack from a fresh checkout\n    runs-on: ubuntu-latest\n', '  dev-stack:\n    name: Contributor stack (${{ matrix.os }})\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n    runs-on: ${{ matrix.os }}\n')
+    text = text.replace('      - name: Non-TTY owner, OpenCode, reload, supervision and cleanup proof\n        run: npm run smoke:dev-stack', "      - name: Non-TTY owner, concurrent OpenCode panes, reload and cleanup proof\n        if: runner.os == 'Linux'\n        run: npm run smoke:dev-stack")
+    text = text.replace('      - name: Retry owned fixture cleanup after an interrupted test\n        if: always()', "      - name: Retry owned fixture cleanup after an interrupted test\n        if: always() && runner.os == 'Linux'")
+    path.write_text(text)
+    git('add', 'scripts/tests/dev-stack.test.mjs', 'scripts/tests/public-docker-distribution.test.mjs', 'scripts/dev-stack-state.mjs', '.github/workflows/ci.yml')
     git('diff', UPSTREAM, '--check')
     actual = output('write-tree')
     if actual != TREE:

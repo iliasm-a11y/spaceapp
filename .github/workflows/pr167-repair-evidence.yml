@@ -15,6 +15,9 @@ concurrency:
   group: pr167-repair-evidence
   cancel-in-progress: false
 
+env:
+  CANDIDATE_TREE: 4a6248b99690d9d291330f3dacad0c291cf433bf
+
 jobs:
   validate:
     if: github.repository == 'iliasm-a11y/spaceapp'
@@ -96,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           git diff --exit-code
-          test "$(git write-tree)" = 4d095965a808b8567a182d69150979ff15a9f519
+          test "$(git write-tree)" = "$CANDIDATE_TREE"
           git diff --cached 50272acbe54c4d82bd3174d712456f6bf3af2e53 --check
       - name: Retry owned cleanup after interruption
         if: always() && runner.os == 'Linux'
@@ -135,8 +138,8 @@ jobs:
           git checkout --detach 91395b1f4de1712c8790957234305697ad607ef3
           python3 "$RUNNER_TEMP/pr167-repair.py" "$RUNNER_TEMP/pr167-upgrade.b64"
           test "$(git ls-remote origin refs/heads/feat/contributor-dev-stack-65 | cut -f1)" = 91395b1f4de1712c8790957234305697ad607ef3
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Merge upstream main and supervise isolated OpenCode 2 contributor sessions' -m 'Preserve existing history and security gates; add exact pin parsing, safe state migration, a shared authenticated server, and concurrent-pane smoke coverage. Candidate tree validated on Linux and macOS by the PR167 repair workflow.'
-          test "$(git rev-parse HEAD^{tree})" = 4d095965a808b8567a182d69150979ff15a9f519
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Merge upstream main and supervise isolated OpenCode 2 contributor sessions' -m 'Preserve existing history and security gates; add exact pin parsing, safe state migration, a shared authenticated server, concurrent-pane smoke coverage, and durable Linux/macOS regressions. Candidate tree validated by the PR167 repair workflow.'
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
           git push origin "HEAD:refs/heads/codex/pr167-tested-${GITHUB_RUN_ID}"
           printf 'PUBLISHED_CANDIDATE=%s\n' "$(git rev-parse HEAD)"
           printf 'PUBLISHED_BRANCH=codex/pr167-tested-%s\n' "$GITHUB_RUN_ID"
