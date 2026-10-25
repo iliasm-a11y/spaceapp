@@ -6,6 +6,7 @@ on:
       - codex/pr167-repair-20261025
     paths:
       - .github/workflows/pr167-repair-evidence.yml
+      - .github/pr167/**
 
 permissions:
   contents: read
@@ -15,52 +16,127 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  inspect:
+  validate:
     if: github.repository == 'iliasm-a11y/spaceapp'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Capture immutable source refs and inspect merge without publishing
+      - name: Reproduce the reviewed source tree with immutable parents
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pr167-evidence"
-          git fetch --no-tags https://github.com/oll4com/spaceapp.git \
-            main:refs/heads/audit-upstream \
-            refs/pull/76/head:refs/heads/audit-competitor-76
-          git branch audit-pr167 91395b1f4de1712c8790957234305697ad607ef3
-          {
-            printf 'UTC: '; date -u +%FT%TZ
-            printf 'PR head: '; git rev-parse audit-pr167
-            printf 'Upstream: '; git rev-parse audit-upstream
-            printf 'PR 76: '; git rev-parse audit-competitor-76
-            node --version
-            git --version
-          } | tee "$RUNNER_TEMP/pr167-evidence/refs.txt"
-          git bundle create "$RUNNER_TEMP/pr167-evidence/source.bundle" \
-            refs/heads/audit-pr167 refs/heads/audit-upstream refs/heads/audit-competitor-76
-          git checkout --detach audit-pr167
-          set +e
-          git -c user.name='PR 167 diagnostics' -c user.email='diagnostics@localhost' \
-            merge --no-commit --no-ff audit-upstream \
-            > "$RUNNER_TEMP/pr167-evidence/merge.log" 2>&1
-          result=$?
-          set -e
-          cat "$RUNNER_TEMP/pr167-evidence/merge.log"
-          git diff --name-only --diff-filter=U | tee "$RUNNER_TEMP/pr167-evidence/conflicts.txt"
-          git diff --cc > "$RUNNER_TEMP/pr167-evidence/conflicts.patch"
-          git status --short
-          if [ "$result" -gt 1 ]; then exit "$result"; fi
-          if [ "$result" -eq 1 ] && [ ! -s "$RUNNER_TEMP/pr167-evidence/conflicts.txt" ]; then exit 1; fi
-      - name: Retain source and conflict evidence
+          cp .github/pr167/repair.py "$RUNNER_TEMP/pr167-repair.py"
+          cp .github/pr167/upgrade.patch.gz.b64 "$RUNNER_TEMP/pr167-upgrade.b64"
+          git fetch --no-tags https://github.com/oll4com/spaceapp.git main:refs/remotes/origin/audit-upstream
+          git checkout --detach 91395b1f4de1712c8790957234305697ad607ef3
+          python3 "$RUNNER_TEMP/pr167-repair.py" "$RUNNER_TEMP/pr167-upgrade.b64" | tee "$RUNNER_TEMP/pr167-evidence/reproduce.log"
+          git diff --cached --binary 50272acbe54c4d82bd3174d712456f6bf3af2e53 > "$RUNNER_TEMP/pr167-evidence/candidate.patch"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version | tee "$RUNNER_TEMP/pr167-evidence/node.txt"
+          npm ci 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/install.log"
+      - name: Complete lifecycle and isolation regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:dev-stack 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/lifecycle.log"
+      - name: Architecture gates and credential installation fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:architecture 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/architecture.log"
+          node --test scripts/tests/public-credential-install.test.mjs scripts/tests/public-package-metadata.test.mjs scripts/tests/public-suite.test.mjs 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/public-contracts.log"
+      - name: Real Linux owner, concurrent OpenCode panes, reload and cleanup
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker compose version
+          npm run smoke:dev-stack 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/smoke.log"
+      - name: Typecheck the full workspace
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/typecheck.log"
+      - name: API integration regression tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm exec -w @space/api -- vitest run tests/auth-dev-isolation.test.ts tests/dev-service-isolation.test.ts tests/readiness-probes.test.ts tests/storage-warning.test.ts 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/api-tests.log"
+      - name: Lint and source-export verification
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx eslint --max-warnings=0 scripts/dev-stack.mjs scripts/dev-stack-state.mjs scripts/dev-stack-processes.mjs scripts/dev-stack-opencode.mjs scripts/dev-stack-smoke.mjs scripts/tests/dev-stack.test.mjs apps/web/vite.config.ts 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/launcher-lint.log"
+          npm run lint 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/lint.log"
+          node scripts/public-export.mjs --output "$RUNNER_TEMP/pr167-public-export" 2>&1 | tee "$RUNNER_TEMP/pr167-evidence/export.log"
+      - name: Ensure tests restored source and retained the reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test "$(git write-tree)" = 4d095965a808b8567a182d69150979ff15a9f519
+          git diff --cached 50272acbe54c4d82bd3174d712456f6bf3af2e53 --check
+      - name: Retry owned cleanup after interruption
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for state in .dev-stack-smoke-*; do
+            if [ -d "$state" ]; then SPACE_DEV_STATE_DIR="$state" npm run dev:stack -- reset; fi
+          done
+      - name: Retain actual validation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr167-repair-evidence
+          name: pr167-validation-${{ runner.os }}-${{ github.run_id }}
           path: ${{ runner.temp }}/pr167-evidence/
-          retention-days: 3
+          retention-days: 14
           if-no-files-found: error
+
+  publish-candidate:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Publish a normal merge commit to a separate tested branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/pr167/repair.py "$RUNNER_TEMP/pr167-repair.py"
+          cp .github/pr167/upgrade.patch.gz.b64 "$RUNNER_TEMP/pr167-upgrade.b64"
+          git fetch --no-tags https://github.com/oll4com/spaceapp.git main:refs/remotes/origin/audit-upstream
+          git checkout --detach 91395b1f4de1712c8790957234305697ad607ef3
+          python3 "$RUNNER_TEMP/pr167-repair.py" "$RUNNER_TEMP/pr167-upgrade.b64"
+          test "$(git ls-remote origin refs/heads/feat/contributor-dev-stack-65 | cut -f1)" = 91395b1f4de1712c8790957234305697ad607ef3
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Merge upstream main and supervise isolated OpenCode 2 contributor sessions' -m 'Preserve existing history and security gates; add exact pin parsing, safe state migration, a shared authenticated server, and concurrent-pane smoke coverage. Candidate tree validated on Linux and macOS by the PR167 repair workflow.'
+          test "$(git rev-parse HEAD^{tree})" = 4d095965a808b8567a182d69150979ff15a9f519
+          git push origin "HEAD:refs/heads/codex/pr167-tested-${GITHUB_RUN_ID}"
+          printf 'PUBLISHED_CANDIDATE=%s\n' "$(git rev-parse HEAD)"
+          printf 'PUBLISHED_BRANCH=codex/pr167-tested-%s\n' "$GITHUB_RUN_ID"
