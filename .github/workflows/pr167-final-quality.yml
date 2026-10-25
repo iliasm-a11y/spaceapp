@@ -1,0 +1,94 @@
+name: PR 167 exported candidate quality
+
+on:
+  push:
+    branches:
+      - codex/pr167-repair-20261025
+    paths:
+      - .github/workflows/pr167-final-quality.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr167-final-quality
+  cancel-in-progress: false
+
+jobs:
+  public-quality:
+    if: github.repository == 'iliasm-a11y/spaceapp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce the exact tested merge tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr167-quality-evidence"
+          cp .github/pr167/repair.py "$RUNNER_TEMP/pr167-repair.py"
+          cp .github/pr167/upgrade.patch.gz.b64 "$RUNNER_TEMP/pr167-upgrade.b64"
+          git fetch --no-tags https://github.com/oll4com/spaceapp.git main:refs/remotes/origin/audit-upstream
+          git checkout --detach 91395b1f4de1712c8790957234305697ad607ef3
+          python3 "$RUNNER_TEMP/pr167-repair.py" "$RUNNER_TEMP/pr167-upgrade.b64" | tee "$RUNNER_TEMP/pr167-quality-evidence/reproduce.log"
+          test "$(git write-tree)" = 4a6248b99690d9d291330f3dacad0c291cf433bf
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Create sanitized public candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/public-export.mjs --output "$RUNNER_TEMP/pr167-public-export" 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/export.log"
+      - name: Install external fixture tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep ffmpeg
+      - name: Install exact candidate dependencies
+        working-directory: ${{ runner.temp }}/pr167-public-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/install.log"
+      - name: Full public release suites
+        working-directory: ${{ runner.temp }}/pr167-public-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:public 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/test-public.log"
+      - name: Typecheck exported workspace
+        working-directory: ${{ runner.temp }}/pr167-public-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/typecheck.log"
+      - name: Production build
+        working-directory: ${{ runner.temp }}/pr167-public-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/build.log"
+      - name: Launcher package dry run
+        working-directory: ${{ runner.temp }}/pr167-public-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run pack:dry-run -w run-spaceapp 2>&1 | tee "$RUNNER_TEMP/pr167-quality-evidence/pack.log"
+      - name: Confirm source remains the reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test "$(git write-tree)" = 4a6248b99690d9d291330f3dacad0c291cf433bf
+      - name: Retain complete quality evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr167-exported-quality-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr167-quality-evidence/
+          retention-days: 14
+          if-no-files-found: error
